@@ -121,35 +121,151 @@ just that the two sum correctly.
 
 ---
 
-## Open, not yet decided
+## 2026-09-11 — Stage 1 usage model, and both open questions settled
 
-**Should the closing spread/total feed the usage model?** A 7-point
-underdog throws more, and `implied_team_totals` is free and known before
-kickoff. That is a structural advantage baseball never had. It is also the
-fastest way to launder the market's opinion into a model that is then
-compared *against* the market. Decide deliberately; keep a no-market
-variant and report both.
+### Architecture: targets = N x p
 
-**Within-team correlation.** Every receiver on one team draws from the same
-~35 attempts, so residuals are strongly negatively correlated within a team
-and positively correlated with the game total. A week's ~200 prop rows are
-worth far fewer than 200 independent observations. `paired_bootstrap` in
-`model/scoring.py` currently resamples rows and therefore understates
-intervals; it should resample games. Flagged in the docstring, not fixed.
+    N   = team pass volume that game     (team-level, volatile)
+    p_i = player's share of it           (player-level, stable)
 
-**TB-over-2.5 problem, football version.** Nothing yet, but the baseball
-analogue — a measurement taken and then not reported anywhere, so it could
-not be recovered without re-running — is worth guarding against from the
-start. Lab runs write their output CSV.
+Chosen because it makes three problems fall out of one structure: it puts
+the model where the reliability is, it *generates* teammate dependence
+instead of bolting it on, and it isolates the market question to a single
+term. Implemented in `features/usage.py`.
+
+### RESULT: the market question is settled — MARKET_IN_VOLUME stays off
+
+Rolling origin, test seasons 2022–2025, train on all prior, 2,174 held-out
+team-games. Predicting team pass attempts:
+
+| subset | RMSE no-market | RMSE market | gain | 95% CI on MSE gain |
+|---|---|---|---|---|
+| all games | 7.450 | 7.387 | +0.062 | [+0.220, +1.665] |
+| weeks 1–4 | 8.082 | 7.982 | +0.100 | [+0.286, +2.909] |
+| weeks 5+ | 7.244 | 7.194 | +0.050 | [-0.198, +1.557] |
+| \|spread\| >= 7 | 7.253 | 7.180 | +0.073 | [-0.324, +2.400] |
+
+Coefficients stable across all four test seasons: **+0.495 pass attempts
+per point of implied team total**, **-0.194 per point of own expected
+margin**. Favourites throw less. The signal is real and the direction is
+exactly what football sense says.
+
+It is also under 1% of RMSE, and only unambiguously non-zero in weeks 1–4
+where the team has no trailing history. **Off by default**: a 1% gain does
+not buy a benchmark contaminated by the thing being benchmarked against.
+
+**What the data does NOT say.** corr(trailing volume, implied total) =
+**0.081** — the market is *nearly orthogonal* to the trailing rate, not
+redundant with it. So this is NOT the baseball "level feature overlapping
+an existing one" finding, and it should not be filed as the sixth instance
+of it. The reason the gain is small is more uncomfortable: **team pass
+volume is barely predictable from anything.** R^2 of N on its own trailing
+mean is **0.0896**; the market alone manages corr 0.117. Two weak
+predictors of a noisy quantity.
+
+That is itself an architectural result. If N is near-unpredictable, Stage
+1's job is to get the *distribution* of N right, not its mean — and the
+forecastable signal lives almost entirely in p_i.
+
+### RESULT: within-team correlation — my earlier claim was wrong
+
+The recon doc asserted residuals are "strongly negatively correlated within
+a team." Measured on 2,009 teammate pairs (team-seasons >= 12 weeks,
+players above 8% target share):
+
+| what | mean Cov | % negative |
+|---|---|---|
+| both active, raw targets | **+0.483** | 41% |
+| fixed-share multinomial predicts | +0.583 | 14% |
+| all weeks, injuries included | +0.122 | 47% |
+| residual, conditional on realised N | **rho = -0.147** | 69% |
+
+Read in order:
+
+- Teammates are **positively** correlated in raw targets. That is just the
+  overdispersion — Var(N) = 63.8 against E[N] = 32.3, so the identity
+  `Cov(T_i,T_j) = p_i p_j (Var(N) - E[N])` predicts a positive sign. A team
+  that drops back 45 times feeds everybody.
+- The fixed-share multinomial gets that roughly right, over-predicting
+  slightly (+0.58 vs +0.48).
+- Injuries drag the unconditional covariance down by **-0.36**. Real, and a
+  *different mechanism* — availability, not allocation. Model it as
+  availability, not as correlation.
+- Conditional on realised volume, residuals are negatively correlated at
+  **-0.147**. Given 38 dropbacks, a target to one man is a target not
+  thrown to another.
+
+**The practical consequence is the opposite of the usual warning.** Since
+`Var(mean of k) = sigma^2/k * (1 + (k-1)rho)`, negative rho makes k
+correlated rows worth **more** than k independent ones: at rho = -0.147,
+three teammates are worth **4.24** independent rows, not fewer.
+
+But that holds only conditional on getting N right. Miss the volume and the
+positive unconditional correlation applies instead, and every teammate is
+wrong in the same direction at once.
+
+**So: the sign of teammate correlation depends on whether the error is in
+volume or in allocation.** Resample GAMES, not rows — that captures both
+regimes without having to pick one. `paired_bootstrap` still resamples rows
+and is still wrong; now there is a number saying how.
+
+### Validation: rolling origin, 15,171 held-out player-games
+
+Seasons 2022–2025, week 5+, fit strictly on prior weeks. `validate_usage.py`
+calls the same fit/predict functions the predictor will.
+
+```
+mean CRPS          model 1.1114   team-blind 1.7697   climatology 1.5092
+CRPS skill         vs team-blind +0.3720     vs climatology +0.2636
+
+Brier skill        over 2.5  +0.3942   (base rate 0.476)
+                   over 4.5  +0.3899   (base rate 0.277)
+                   over 6.5  +0.3205   (base rate 0.150)
+                   over 4.5, climatology  +0.2848
+```
+
+**Do not read +0.39 as "twenty times better than the baseball model."** It
+is not. The null is weaker. V4 said it directly: the baseball pool was nine
+elite sluggers, so the base rate was pool-specific and there was little
+between-player variance to exploit. Here the pool is every pass-catcher in
+the league, so between-player variance is enormous and ranking a WR1 above
+a backup TE is trivially easy. **The honest comparison is against
+climatology**, and there the margin is +0.264 CRPS and +0.39 vs +0.28
+Brier — real, but a fraction of what the base-rate number suggests.
+
+Calibration, over 4.5 targets, quintiles of predicted probability:
+
+```
+pred 0.001  actual 0.016  n=3034  gap +0.015
+pred 0.030  actual 0.056  n=3034  gap +0.026
+pred 0.144  actual 0.161  n=3035  gap +0.017
+pred 0.410  actual 0.398  n=3033  gap -0.013
+pred 0.790  actual 0.756  n=3034  gap -0.034
+```
+
+Monotone and close, but the pattern is the V4 signature in miniature:
+under-predicting the bottom, over-predicting the top — **spread slightly
+too wide**. Watch item, not yet an action.
+
+### Known flaw, and it is the top of the next list
+
+**A player with no history gets share = 0, which is a point mass at zero.**
+The bottom calibration bucket says predicted 0.001 against actual 0.016 —
+1.6% of players the model calls impossible go over 4.5 targets. This is the
+football version of the baseball Tier-3 finding where `fillna(0.0)` gave a
+debut hitter a HR rate below anyone alive. A rookie WR1 in week 1 is the
+case that breaks it, and it is not rare.
+
+Fix: unknown and thin players get a role prior from depth-chart position,
+not zero.
 
 ---
 
 ## Next
 
-1. Stage 1 usage model: targets and carries, trained 2019–2025, rolling
-   origin by week, serve-time features only.
-2. Stage 2 per-opportunity distribution, hurdle form, shrunk to role.
-3. Compound; score CRPS, then Brier at posted lines.
-4. Only then a role-change flag — logged, fed to nothing.
-
-Do not start with a feature. Items 1–3 contain none.
+1. **Thin-player prior** — the flaw above. Cheap, and it is a correctness
+   fix to something already measured.
+2. Stage 2: per-opportunity yardage, hurdle form, shrunk to role.
+3. Compound Stage 1 x Stage 2; score CRPS, then Brier at real posted lines.
+4. Fix `paired_bootstrap` to resample games.
+5. Only then a role-change flag — logged, fed to nothing.
