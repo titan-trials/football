@@ -1,0 +1,33 @@
+# Line endings, settled once -- same policy as baseball_predictor.
+#
+# WHY THIS EXISTS
+# ---------------
+# Carried over from the sibling project, where 29 files showed as modified
+# having had nothing done to them: 188 insertions and 188 deletions across
+# four files, every line "changed", and `git diff --ignore-all-space`
+# showing zero actual differences. The files were written to disk with CRLF
+# while the repo held LF, and with core.autocrlf unset git treats that as
+# real content.
+#
+# That is worse than cosmetic. A diff where every line changed hides the
+# one line that actually did, and this project's whole debugging method is
+# reading diffs carefully.
+#
+# Setting it here, on day one, means it never happens in this repo.
+#
+# `text=auto eol=lf` means: git decides what is text, stores it with LF in
+# the repository, and checks it out with LF.
+* text=auto eol=lf
+
+# PowerShell is the exception. setup.ps1 uses a here-string (@"..."@), and
+# CRLF is the native convention for Windows-only scripts -- there is no
+# Linux consumer of this file to keep byte-identical.
+*.ps1 text eol=crlf
+
+# Explicitly binary, so git never tries to normalise or diff them as text.
+*.parquet binary
+*.png binary
+*.jpg binary
+*.pdf binary
+*.joblib binary
+*.pkl binary

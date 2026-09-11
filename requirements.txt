@@ -1,0 +1,55 @@
+# NFL prop model dependencies
+#
+# Install with:
+#     python -m pip install -r requirements.txt
+#
+# Use `python -m pip`, NOT bare `pip` -- same reason as baseball_predictor:
+# Windows venvs are not relocatable. The .exe launchers in Scripts\ have the
+# absolute path to python.exe compiled into the binary, so if the project
+# folder is ever moved, pip.exe fails with "Unable to create process" while
+# `python -m pip` keeps working. baseball_predictor\venv_broken is what that
+# looks like when it happens.
+#
+# This file is UTF-8. PowerShell's `pip freeze > requirements.txt` writes
+# UTF-16, which pip cannot read back. If you regenerate it, use:
+#     python -m pip freeze | Out-File -Encoding utf8 requirements.txt
+#
+# VERIFICATION NOTE (2026-09-10): the full suite passes in a clean venv with
+# pandas 2.3.3 / polars 1.44.2 / nflreadpy 0.1.5 / pyarrow 25.0.0. The numpy
+# and scipy pins below match baseball_predictor exactly, but both require
+# Python 3.12+; they could not be installed in the sandbox that ran the
+# tests (3.11), so they were verified at numpy 2.4.6 / scipy 1.17.1 instead.
+# If your Python is below 3.12, relax those two lines.
+
+# --- Core data: nflverse ----------------------------------------------
+# nflreadpy, NOT nfl_data_py. nfl_data_py is stale -- import_weekly_data
+# 404s against the current nflverse release layout, and installing it
+# downgrades pandas to 1.5.3. Do not add it back.
+nflreadpy==0.1.5
+
+# polars is nflreadpy's native return type. Frames are kept in polars
+# through the data layer and only converted at the modelling boundary.
+polars==1.44.2
+
+# Parquet, for the cache. nflverse pbp is 397 columns; CSV round-trips lose
+# dtypes and cost seconds per read.
+pyarrow==25.0.0
+
+# --- Scientific stack (matches baseball_predictor) ---------------------
+pandas==2.3.3
+numpy==2.5.1
+scikit-learn==1.9.0
+scipy==1.18.0
+
+# --- Dashboard --------------------------------------------------------
+streamlit
+altair
+
+# --- Odds API ---------------------------------------------------------
+# Featured markets (spread/total/moneyline) come free from nflverse
+# schedules back to 1999 -- see data/market_lines.py. Credits are only ever
+# spent on player props, which are per-event.
+requests==2.34.2
+
+# --- Tests ------------------------------------------------------------
+pytest==9.1.1

@@ -1,0 +1,54 @@
+# --- Python -----------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Virtual environments ---------------------------------------------
+# Windows venvs are not relocatable and are ~300MB. Never commit one.
+.venv/
+venv/
+venv_*/
+env/
+ENV/
+
+# --- Data cache -------------------------------------------------------
+# nflverse pulls are reproducible from the loaders in data/nflverse.py, so
+# the cache is derived data, not source. A full pbp history is ~1GB.
+cache/*.parquet
+cache/*.csv
+!cache/.gitkeep
+
+# --- Predictions and scoring logs -------------------------------------
+# These ARE the evidence and they are append-only, so they are tracked
+# deliberately -- with one exception below. If a weekly slate file ever
+# gets large enough to be annoying, compress it; do not stop tracking it.
+# (baseball's scoring_log.csv is the reason the model can be argued about
+# at all.)
+slates/*.tmp
+*.parquet.tmp
+
+# --- Secrets ----------------------------------------------------------
+.env
+.env.*
+secrets.json
+odds_api_key.txt
+
+# --- OS / editor ------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+
+# --- OneDrive ---------------------------------------------------------
+# This repo lives under OneDrive. These are its sync artifacts.
+*.tmp
+~$*
