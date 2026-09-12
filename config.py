@@ -60,7 +60,7 @@ POSTSEASON_ONLY_FEEDS = (
 # Trailing window for the league prior. The baseball era-drift finding was
 # +6.8% on all-history versus 12 months; passing volume drifts at least as
 # fast, so the prior is trailing, never full-cache.
-PRIOR_TRAILING_SEASONS = 3
+PRIOR_TRAILING_SEASONS = 2
 
 # Minimum opportunities before a player's own rate is allowed to move his
 # estimate at all. Below this he is the position/role baseline.

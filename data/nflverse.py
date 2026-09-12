@@ -28,6 +28,7 @@ do so by accident.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Iterable, Optional, Sequence
 
 import nflreadpy as nfl
@@ -126,6 +127,24 @@ def load_injuries(seasons: Iterable[int], through_week: Optional[int] = None,
                  through_week, current_season, False)
 
 
+def load_rosters_weekly(seasons: Iterable[int], through_week: Optional[int] = None,
+                        current_season: int = 2026) -> pl.DataFrame:
+    """
+    Weekly roster with a per-week `status`: ACT, INA, RES, DEV, CUT, RET.
+
+    This is what separates "was active and got nothing" from "was not
+    there". A player on injured reserve did not fail to get targets; he was
+    absent, and counting his absence as a zero drags his rate toward zero
+    for the rest of the season. Sam LaPorta went RES for weeks 11-18 of
+    2025, and a trailing-8 window over those weeks made a TE1 look like a
+    practice-squad body.
+
+    Updates daily at 07:00 UTC, so it is a serve-time feed.
+    """
+    return _load("rosters_weekly", list(seasons), nfl.load_rosters_weekly,
+                 through_week, current_season, False)
+
+
 def load_depth_charts(seasons: Iterable[int], through_week: Optional[int] = None,
                       current_season: int = 2026) -> pl.DataFrame:
     return _load("depth_charts", list(seasons), nfl.load_depth_charts,
@@ -160,9 +179,76 @@ def current_week(season: int = 2026) -> int:
     """
     The last week with a completed game. This is the week whose OUTCOMES are
     known; features for the upcoming slate are built `through_week=` this.
+
+    NOT the week to predict -- see `upcoming_week`. An NFL week straddles
+    Thursday to Monday, so "a game has finished in week 1" and "week 1 is
+    over" are different statements for four days out of seven.
     """
     sch = load_schedules()
     done = sch.filter((pl.col("season") == season) & pl.col("result").is_not_null())
     if done.height == 0:
         return 0
     return int(done["week"].max())
+
+
+def _kickoffs(season: int) -> pl.DataFrame:
+    sch = load_schedules().filter(pl.col("season") == season)
+    return sch.with_columns(
+        (pl.col("gameday").cast(pl.Utf8) + " " + pl.col("gametime").fill_null("13:00"))
+        .str.to_datetime("%Y-%m-%d %H:%M", strict=False).alias("kickoff")
+    ).drop_nulls("kickoff")
+
+
+def current_season(now=None) -> int:
+    """
+    The NFL season that is currently in progress, by calendar date.
+
+    A season is labelled by the year it STARTS, and it runs into February.
+    So January and February belong to the previous year's season, and March
+    onward belongs to the current one. Getting this wrong in February would
+    ask for a season that has not been played.
+
+    March is the cut rather than, say, September because the label has to be
+    unambiguous the moment the previous season ends -- the draft, free
+    agency and the schedule release all happen in the gap, and every one of
+    them is data about the upcoming season.
+    """
+    now = now or datetime.now(timezone.utc)
+    return now.year if now.month >= 3 else now.year - 1
+
+
+def upcoming_week(season: int = 2026, now=None) -> int:
+    """
+    The week containing the next game that has not kicked off yet. THIS is
+    the week to predict.
+
+    WHY NOT `current_week() + 1`. That was the first version and it was
+    wrong for most of every week. On 2026-09-12, week 1 had 16 games with
+    only 2 played and 14 still to come -- the next kickoff was a week 1
+    game -- but last-completed-week + 1 said week 2. The predictor produced
+    a slate for games five days further out than the ones about to be
+    played, and a market log captured for week 1 would have joined to
+    nothing.
+
+    Falls back to the last scheduled week once the season is over.
+    """
+    from datetime import datetime, timezone
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    k = _kickoffs(season).filter(pl.col("kickoff") > now).sort("kickoff")
+    if k.height == 0:
+        allk = _kickoffs(season)
+        return int(allk["week"].max()) if allk.height else 1
+    return int(k["week"][0])
+
+
+def week_window(season: int, week: int, now=None) -> tuple:
+    """
+    (first_kickoff, last_kickoff) for one week. Used to scope an odds pull
+    to exactly one slate rather than to a rolling number of days, which
+    straddles weeks -- an 8-day window on 2026-09-12 caught 14 week-1 games
+    plus week 2's Thursday opener.
+    """
+    k = _kickoffs(season).filter(pl.col("week") == week)
+    if k.height == 0:
+        return None, None
+    return k["kickoff"].min(), k["kickoff"].max()

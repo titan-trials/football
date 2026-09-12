@@ -69,3 +69,76 @@ MARKET_IN_SHARE = False
 # Not built. When it is, it goes in as a logged column fed to nothing, and
 # is checked after ~20 weeks. Nothing is at risk that way.
 ROLE_CHANGE_FLAG = False
+
+# ---------------------------------------------------------------------
+# SHARE_DISPERSION
+#
+# Treat a player's share of team opportunities as a random variable rather
+# than a constant: BetaBinomial(N, p, c) in place of Binomial(N, p), with
+# the concentration c estimated per depth-chart role.
+#
+# WHY IT EXISTS. Decomposing the predicted variance against reality on the
+# 2025 served population (validate_width.py) gave, as var(pred)/MSE:
+#
+#     stage 1a  team volume               1.07 - 1.08   calibrated
+#     stage 2   per-opportunity outcome   0.99 - 1.02   calibrated
+#     stage 1   player opportunities      0.20 - 0.57   NOT
+#
+#     end to end, ranks 1-3:  passing 0.372   rushing 0.531
+#                             receptions 0.659   receiving 0.773
+#
+# Both ends of the pipeline are right and the step between them is short by
+# a factor of two to five. Under a fixed share the only variance available
+# to a player is sampling, p(1-p)E[N] + p^2 Var(N), and for a QB at p=0.95
+# that is almost nothing -- the model asserts a starter's attempt count is
+# nearly certain when in reality it swings from 19 to 41.
+#
+# The consequence is not a bias, which is what makes it easy to miss: mean
+# calibration on ranks 1-3 is 0.997 / 0.992 / 0.973 / 1.011 across the four
+# props, essentially perfect. But a prop settles on P(X > L), and a
+# too-narrow distribution with the right mean under-prices every over above
+# the median. Measured: QB1 passing over 224.5 priced at 0.112 against a
+# realised 0.176.
+#
+# WHAT TO MEASURE BEFORE TURNING IT ON. The opportunity variance ratio
+# should move toward 1.0 without the mean moving at all (the beta-binomial
+# has the same mean as the binomial by construction -- assert it), CRPS
+# should fall, and mean predicted probability at the high lines should
+# approach the realised base rate. If CRPS rises while the ratio improves,
+# the concentration estimate is wrong and not the structure.
+#
+# TURNED ON 2026-09-12. Every one of those checks passed, on 2025 rolling
+# origin, served population, fixed share -> beta-binomial:
+#
+#     CRPS         passing 30.574 -> 26.803   (-12.3%)
+#                  rushing  3.542 ->  3.464   ( -2.2%)
+#                  receptions 0.536 -> 0.529  ( -1.3%)
+#                  receiving  6.674 -> 6.625  ( -0.7%)
+#
+#     opportunity variance ratio   passing 0.199 -> 0.649
+#                                  receiving/receptions 0.570 -> 0.868
+#                                  rushing 0.534 -> 0.720
+#
+#     mean UNMOVED, as the structure requires: QB ranks 1-3 ratio
+#     1.011 -> 1.010, receptions 0.992 -> 0.992, bias +1.07 -> +1.03
+#
+#     tail calibration, mean predicted p vs realised base rate, ranks 1-3
+#         passing over 174.5   0.198 -> 0.229  against 0.257
+#         passing over 224.5   0.112 -> 0.141  against 0.176
+#         passing over 264.5   0.063 -> 0.084  against 0.096
+#         receptions over 4.5  0.125 -> 0.135  against 0.141
+#         receptions over 5.5  0.073 -> 0.084  against 0.089
+#
+#     Brier skill rose at EVERY line of every prop, and skill against
+#     climatology for passing yards went +0.0216 -> +0.1423.
+#
+# CHANGEOVER BOOKKEEPING. Slates predicted before this date used the fixed
+# share. slates/slate_2026_wk1.parquet is a MIXED slate: rows for games
+# that had already kicked off were preserved by design and come from the
+# old model. Do not pool week 1 with later weeks without splitting on it.
+#
+# WHAT IS STILL WRONG. The ratio is 0.65-0.87, not 1.0, and the residual is
+# worst for QBs. A beta is unimodal and a starter's attempt count is not: he
+# plays the whole game or he leaves it. That needs a mixture, not a wider
+# beta, and it is a separate piece of work.
+SHARE_DISPERSION = True

@@ -35,8 +35,10 @@ slates/*.tmp
 *.parquet.tmp
 
 # --- Secrets ----------------------------------------------------------
+# .env holds the Odds API key. .env.example is the committed template.
 .env
 .env.*
+!.env.example
 secrets.json
 odds_api_key.txt
 
@@ -47,6 +49,9 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# --- Secrets (second location) ----------------------------------------
+.odds_api_key
 
 # --- OneDrive ---------------------------------------------------------
 # This repo lives under OneDrive. These are its sync artifacts.

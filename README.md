@@ -25,6 +25,20 @@ no reason to have it on disk while sorting out a remote.
 Do not move the folder after `setup.ps1` -- Windows venvs are not
 relocatable, which is what `baseball_predictor\venv_broken` is.
 
+## Running it
+
+Two commands, neither takes arguments. See **RUNBOOK.md**.
+
+```powershell
+python run_slate.py     # Wednesday: capture lines -> predict -> compare
+python score_slate.py   # Tuesday, after the Monday game
+streamlit run dashboard.py
+```
+
+Both resolve the season and week from the schedule and are safe to re-run.
+`run_slate.py` skips buying lines it already has, so re-running mid-week to
+pick up the late games costs nothing for the early ones.
+
 ## Layout
 
 ```
