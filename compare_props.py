@@ -68,7 +68,8 @@ from model.scoring import brier_skill, crps_pmf
 # THE SAME FUNCTION THE PREDICTOR USES, not a copy of it. The whole point of
 # this rewrite is that the harness and the predictor cannot disagree about
 # who is on the slate, and two implementations of one rule always drift.
-from model_flags import SHARE_DISPERSION
+from model_flags import (ROLE_RELATIVE_POSITIONS, SHARE_DISPERSION,
+                         SHARE_MIXTURE_POSITIONS)
 from predict_slate import restrict_to_available
 
 
@@ -152,7 +153,9 @@ def served_rows(spec, stats_pg, rr, statuses, season, week) -> pl.DataFrame:
 
 def run_prop(spec, pbp, ps, rr, score_season, min_week, trailing, prior_seasons,
              statuses=None, fit="roster", population="served",
-             share_dispersion=SHARE_DISPERSION):
+             share_dispersion=SHARE_DISPERSION,
+             mixture_positions=SHARE_MIXTURE_POSITIONS,
+             role_relative=ROLE_RELATIVE_POSITIONS):
     """
     `population` selects the rows that get SCORED:
 
@@ -201,7 +204,9 @@ def run_prop(spec, pbp, ps, rr, score_season, min_week, trailing, prior_seasons,
 
         vol = TeamVolumeModel.fit(past_tg, trailing=trailing, prior_seasons=prior_seasons)
         shr = ShareModel.fit(past_pg, trailing=trailing, roles=cur,
-                             share_dispersion=share_dispersion)
+                             share_dispersion=share_dispersion,
+                             mixture_positions=mixture_positions,
+                             role_relative=role_relative)
 
         if spec.has_shape:
             fit_rows = past_rows.drop_nulls("asof_shape")
@@ -240,9 +245,12 @@ def run_prop(spec, pbp, ps, rr, score_season, min_week, trailing, prior_seasons,
             vpmf = vol.pmf(tn)
 
             for pid, share, role, act in zip(pids, shares, roles, actual):
-                conc = shr.concentration_for(role) if share_dispersion else None
+                mix = shr.mixture_for(role)
+                conc = (shr.concentration_for(role)
+                        if share_dispersion and mix is None else None)
                 opmf = opportunity_pmf(vpmf, vol.support, float(share),
-                                       share_concentration=conc)
+                                       share_concentration=conc,
+                                       share_mixture=mix)
                 opmf_t = np.zeros(len(opp_sup))
                 n = min(len(opmf), len(opp_sup))
                 opmf_t[:n] = opmf[:n]
@@ -329,6 +337,13 @@ if __name__ == "__main__":
                     help="beta-binomial share instead of a fixed one")
     ap.add_argument("--no-share-dispersion", dest="share_dispersion",
                     action="store_false")
+    ap.add_argument("--role-relative", nargs="*",
+                    default=list(ROLE_RELATIVE_POSITIONS),
+                    help="positions using the role-relative multiplier")
+    ap.add_argument("--mixture-positions", nargs="*",
+                    default=list(SHARE_MIXTURE_POSITIONS),
+                    help="positions using the empirical share histogram; "
+                         "pass with no values to disable")
     a = ap.parse_args()
 
     pbp = load_pbp(a.seasons)
@@ -347,7 +362,8 @@ if __name__ == "__main__":
         print(f"running {name} ...", flush=True)
         df = run_prop(spec, pbp, ps, rr, a.score_season, a.min_week,
                       a.trailing, a.prior_seasons, statuses, a.fit, a.population,
-                      a.share_dispersion)
+                      a.share_dispersion, tuple(a.mixture_positions),
+                      tuple(a.role_relative))
         if df.is_empty():
             print(f"  {name}: no rows")
             continue
@@ -359,7 +375,9 @@ if __name__ == "__main__":
           f"climatology\n  scored population: {a.population}"
           f"{' (depth chart minus unavailable -- what predict_slate serves)' if a.population == 'served' else ' (weekly stats table -- legacy, players who recorded something)'}"
           f"\n  share model fitted on: {a.fit}"
-          f"\n  share dispersion: {'BETA-BINOMIAL' if a.share_dispersion else 'fixed share'}")
+          f"\n  share dispersion: {'BETA-BINOMIAL' if a.share_dispersion else 'fixed share'}"
+          f"\n  empirical share mixture: {', '.join(a.mixture_positions) or 'none'}"
+          f"\n  role-relative share: {', '.join(a.role_relative) or 'none'}")
     print(f"{'='*86}")
     print(f"{'prop':18} {'n':>6} {'mean':>8} {'CRPS':>8} {'clim':>8} {'skill':>8} {'shape':>8} {'bias':>8}")
     for r in sorted(results, key=lambda x: -x["crps_skill_vs_clim"]):

@@ -142,3 +142,142 @@ ROLE_CHANGE_FLAG = False
 # plays the whole game or he leaves it. That needs a mixture, not a wider
 # beta, and it is a separate piece of work.
 SHARE_DISPERSION = True
+
+# ---------------------------------------------------------------------
+# SHARE_MIXTURE_POSITIONS
+#
+# Positions whose share is drawn from the ROLE'S EMPIRICAL DISTRIBUTION on
+# a 51-point grid, instead of from a beta with that role's concentration.
+# Everything not listed here keeps the beta-binomial from SHARE_DISPERSION.
+#
+# WHY QB AND ONLY QB. SHARE_DISPERSION fixed most of the missing width but
+# left quarterbacks at a variance ratio of 0.649 against 0.868 for
+# receivers. The residual is not a beta that is too narrow -- it is that a
+# beta is UNIMODAL and a quarterback's share is not. Share of team pass
+# attempts, 2022-2025, ACT weeks only:
+#
+#     QB1  n=1994  mean 0.922   <0.10: 4.4%   0.10-0.80: 5.7%   >=0.80: 90.0%
+#     QB2  n=2073  mean 0.127   <0.10: 82.1%  0.10-0.80: 8.4%   >=0.80: 9.5%
+#     QB3  n= 367  mean 0.120   <0.10: 84.2%  0.10-0.80: 5.7%   >=0.80: 10.1%
+#     QB4  n= 137  mean 0.000   <0.10: 100%   (sd 0.000 -- never thrown a pass)
+#
+# QB2's mean is 0.127 and he is at 0.127 essentially never. He throws
+# nothing four weeks in five and the whole game one week in ten. Any
+# unimodal distribution centred on his mean describes a week that does not
+# occur: right on average, wrong at every line. Receivers have no such
+# structure -- a WR2's share is genuinely unimodal around its mean -- which
+# is why this is scoped by position rather than turned on everywhere.
+#
+# It also attacks the OTHER open QB problem at the same time. Per team-week
+# the old model allocated passing yards QB1 82.2% / QB2+ 17.8% against an
+# actual 88.6% / 11.4%, so QB1 came out 5.8% low. A distribution that puts
+# 82% of QB2's mass at exactly zero cannot leak that.
+#
+# COST: the role's SHAPE is pooled, so a player with an unusual pattern
+# gets the role's. His LEVEL is kept exactly -- the role histogram is mixed
+# with a point mass at 0 (below the role mean) or at 1 (above it), and both
+# preserve E[T] = E[N] * share to 1e-3 at every share. For a position where
+# the player's own history is the signal (target share reliability 0.863)
+# pooling the level would be a bad trade, which is the second reason for
+# the position gate.
+#
+# TURNED ON 2026-09-12, after SHARE_DISPERSION, measured on 2025:
+#
+#     opportunity variance ratio, by depth-chart rank
+#         QB1   0.707 -> 1.031        QB2   0.464 -> 0.804
+#     (QB3 goes 1.18 -> 2.18, over-dispersed, but its problem is its MEAN:
+#      2.21 predicted attempts against 0.49 actual. That is the deep-bucket
+#      share prior, which this change does not touch and was not meant to.)
+#
+#     passing_yards   CRPS 26.803 -> 26.055   skill vs clim +0.142 -> +0.166
+#                     CRPS on ranks 1-3  34.393 -> 29.365  (-14.6%)
+#                     bias +1.03 -> +0.99, mean ratio 1.010 -- untouched
+#     rushing_yards   flat (QBs are a small part of it)
+#     receivers       IDENTICAL, as the position gate requires
+#
+#     tail calibration, ranks 1-3, mean predicted p vs realised base rate
+#         over 174.5   0.198 -> 0.229 -> 0.256   against 0.257
+#         over 224.5   0.112 -> 0.141 -> 0.166   against 0.176
+#         over 264.5   0.063 -> 0.084 -> 0.102   against 0.096
+#         over 299.5   0.035 -> 0.049 -> 0.060   against 0.044
+#     (three columns: fixed share, beta-binomial, and this. The systematic
+#      under-pricing of QB overs is gone -- the signs are now mixed rather
+#      than all negative, and the two most-traded lines are within a point.)
+SHARE_MIXTURE_POSITIONS = ("QB",)
+
+# ---------------------------------------------------------------------
+# ROLE_RELATIVE_SHARE
+#
+# Express a player's usage as a MULTIPLE of the role he held at the time,
+# and apply that multiple to the role he holds now:
+#
+#     expected_i = sum over trailing games of role_prior(role held THEN)
+#     mu_i       = (actual_i + k) / (expected_i + k)
+#     rate       = mu_i * role_prior(role held NOW)
+#
+# WHY. Every deep bucket over-predicts, same direction, every position:
+# WR7 2.1x, RB4 3.2x, TE4 1.8x, QB3 4.5x. The role PRIORS are not the
+# problem -- against what those roles actually produce they are exact to
+# two decimals. The player's own history is.
+#
+#     current WR7s, 2025 wk10   mean depth rank over trailing 8:  3.56
+#                               what they averaged there:         2.631
+#                               what a WR7 averages:              1.131
+#                                                                 2.33x
+#
+# A player at WR7 today was a WR3 a month ago and carries a WR3 average.
+# prior_k sits on its floor of 0.500 -- correctly, because the estimator
+# reports that players within a role genuinely differ -- so the role prior
+# gets 6% of the weight at n=8 and the stale rate carries the rest.
+# Raising k is the wrong fix: it flattens the real differences the
+# estimator is detecting. What transfers across a demotion is not his
+# rate, it is how good he was RELATIVE to the role he held.
+#
+# This is the same error that put the WR7 prior at 1.18 targets a game,
+# fixed a day earlier, reappearing one level down -- there in the prior,
+# here in the player's own rate. Stated generally: a rate earned in one
+# role does not transfer to another, and a depth chart is a thing players
+# move around on.
+#
+# WHAT HAPPENED, 2026-09-12. The mechanism works and the hypothesis was
+# still wrong, which is worth recording in that order.
+#
+# The multiplier does exactly what it was built to do. Current WR7s, 2025
+# week 10, mean RAW rate:
+#
+#     current model        0.4553 targets/game
+#     role-relative        0.1436          (a 3.2x reduction, on target:
+#                                           a WR7 actually gets 0.154)
+#
+# And the SERVED prediction for WR7 still got WORSE, 2.51x -> 3.44x. So
+# the stale rate was never the binding constraint. What the multiplier
+# does is replace "his old rank's production" with "full credit for the
+# rank he holds now" -- and for deep receivers the rank he holds now is
+# not worth full credit, because ranks below about four turn over
+# constantly and a newly-arrived TE4 does not get what a settled TE4 gets
+# (TE4 actual 0.239 against a TE4 prior of 0.647). Promotions moved UP
+# more than demotions moved down, and the net was worse.
+#
+# End to end, all positions on:
+#
+#     passing_yards    26.055 -> 25.399   better
+#     rushing_yards     3.465 ->  3.562   worse
+#     receiving_yards   6.625 ->  6.736   worse
+#
+# It helps exactly where depth rank is a real distinction and hurts where
+# it is close to arbitrary. QB1 versus QB2 is a fact about the team; WR6
+# versus WR7 is a line on a chart that updates slowly. Gated to QB:
+#
+#     passing_yards    26.055 -> 25.399   (-2.5%)  skill +0.166 -> +0.187
+#     rushing_yards     3.465 ->  3.442   (-0.7%)  skill +0.097 -> +0.103
+#     bias unchanged on both; receivers untouched by construction
+#
+# Note that QB-only beats all-positions on rushing (3.442 vs 3.562) as
+# well as matching it on passing, so this is not a compromise -- the
+# non-QB part of the change was pure cost.
+#
+# WHAT REMAINS UNFIXED. WR7 2.5x, RB4 2.5x, TE4 1.5x. The deep-bucket
+# over-prediction survives, and this rules out the explanation I expected.
+# The next hypothesis has to be about the depth chart itself rather than
+# about how its history is used.
+ROLE_RELATIVE_POSITIONS = ("QB",)

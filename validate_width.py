@@ -77,7 +77,8 @@ from features.props import (
 )
 from features.usage import ShareModel, TeamVolumeModel, opportunity_pmf
 from compare_props import served_rows
-from model_flags import SHARE_DISPERSION
+from model_flags import (ROLE_RELATIVE_POSITIONS, SHARE_DISPERSION,
+                         SHARE_MIXTURE_POSITIONS)
 
 
 def moments(pmf: np.ndarray, support: np.ndarray) -> tuple[float, float]:
@@ -133,7 +134,8 @@ def team_volume_width(spec, ps, score_season, min_week, trailing, prior_seasons)
 # ---------------------------------------------------------------------
 
 def opportunity_width(spec, ps, rr, statuses, score_season, min_week,
-                      trailing, prior_seasons, share_dispersion=False):
+                      trailing, prior_seasons, share_dispersion=False,
+                      mixture_positions=(), role_relative=()):
     """
     Team volume and share compounded, against realised opportunities. This
     is the whole of Stage 1, on the served population.
@@ -159,7 +161,9 @@ def opportunity_width(spec, ps, rr, statuses, score_season, min_week,
                 for r in cur.iter_rows(named=True)}
         vol = TeamVolumeModel.fit(past_tg, trailing=trailing, prior_seasons=prior_seasons)
         shr = ShareModel.fit(past_pg, trailing=trailing, roles=cur,
-                             share_dispersion=share_dispersion)
+                             share_dispersion=share_dispersion,
+                             mixture_positions=mixture_positions,
+                             role_relative=role_relative)
 
         now = served_rows(spec, stats_pg, rr, statuses, score_season, week)
         if now.is_empty() or "opportunities" not in now.columns:
@@ -173,9 +177,12 @@ def opportunity_width(spec, ps, rr, statuses, score_season, min_week,
             vpmf = vol.pmf(tn)
             for pid, role, share, act in zip(pids, roles, shares,
                                              grp["opportunities"].to_list()):
-                conc = shr.concentration_for(role) if share_dispersion else None
+                mix = shr.mixture_for(role)
+                conc = (shr.concentration_for(role)
+                        if share_dispersion and mix is None else None)
                 opmf = opportunity_pmf(vpmf, vol.support, float(share),
-                                       share_concentration=conc)
+                                       share_concentration=conc,
+                                       share_mixture=mix)
                 m, v = moments(opmf, np.arange(len(opmf)))
                 rows.append({"role_pos": role[0] if role else None,
                              "role_bucket": role[1] if role else None,
@@ -272,7 +279,9 @@ def main(a) -> None:
 
         ow = opportunity_width(spec, ps, rr, statuses, a.score_season,
                                a.min_week, a.trailing, a.prior_seasons,
-                               a.share_dispersion)
+                               a.share_dispersion,
+                               tuple(a.mixture_positions),
+                               tuple(a.role_relative))
         if not ow.is_empty():
             ratio_line("stage 1: player opportunities",
                        ow["pred_var"].to_numpy(), ow["err2"].to_numpy(), ow.height)
@@ -304,4 +313,8 @@ if __name__ == "__main__":
                     default=SHARE_DISPERSION)
     ap.add_argument("--no-share-dispersion", dest="share_dispersion",
                     action="store_false")
+    ap.add_argument("--mixture-positions", nargs="*",
+                    default=list(SHARE_MIXTURE_POSITIONS))
+    ap.add_argument("--role-relative", nargs="*",
+                    default=list(ROLE_RELATIVE_POSITIONS))
     main(ap.parse_args())

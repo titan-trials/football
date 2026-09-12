@@ -55,7 +55,8 @@ from features.props import (
     player_games, roster_player_games, shape_per_game, team_games,
 )
 from features.usage import ShareModel, TeamVolumeModel, opportunity_pmf
-from model_flags import SHARE_DISPERSION
+from model_flags import (ROLE_RELATIVE_POSITIONS, SHARE_DISPERSION,
+                         SHARE_MIXTURE_POSITIONS)
 
 SLATE_DIR = "slates"
 
@@ -161,7 +162,9 @@ def predict_prop(spec, pbp, ps, rr, season, week, trailing, prior_seasons, roste
 
     vol = TeamVolumeModel.fit(past_tg, trailing=trailing, prior_seasons=prior_seasons)
     shr = ShareModel.fit(past_pg, trailing=trailing, roles=cur,
-                         share_dispersion=SHARE_DISPERSION)
+                         share_dispersion=SHARE_DISPERSION,
+                         mixture_positions=SHARE_MIXTURE_POSITIONS,
+                         role_relative=ROLE_RELATIVE_POSITIONS)
 
     if spec.has_shape:
         per_opp = PerOpportunityModel.fit(
@@ -193,9 +196,12 @@ def predict_prop(spec, pbp, ps, rr, season, week, trailing, prior_seasons, roste
         vpmf = vol.pmf(tn)
 
         for pid, nm, pos, share, role in zip(pids, names, poss, shares, roles):
-            conc = shr.concentration_for(role) if SHARE_DISPERSION else None
+            mix = shr.mixture_for(role)
+            conc = (shr.concentration_for(role)
+                    if SHARE_DISPERSION and mix is None else None)
             opmf = opportunity_pmf(vpmf, vol.support, float(share),
-                                   share_concentration=conc)
+                                   share_concentration=conc,
+                                   share_mixture=mix)
             opmf_t = np.zeros(len(opp_sup))
             n = min(len(opmf), len(opp_sup))
             opmf_t[:n] = opmf[:n]

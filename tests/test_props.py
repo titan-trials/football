@@ -749,3 +749,43 @@ def test_score_slate_refuses_a_week_that_is_not_over():
             "scored a half-played week instead of refusing")
     finally:
         score_slate.week_completeness, score_slate.committed_weeks = real_c, real_w
+
+
+def test_partial_week_cannot_enter_the_permanent_scoring_log():
+    """
+    THE WRITE-PATH GUARD. The completeness check used to live only in week
+    SELECTION, so `--week N` on a Sunday wrote a half-played week into the
+    permanent log and nothing complained.
+
+    It happened: 2026 week 1 went in with 4 of 32 teams, and every aggregate
+    on the dashboard was computed over it until it was noticed. A guard on
+    the read path is a suggestion; a guard on the write path is the rule.
+    """
+    import os
+    import tempfile
+
+    import score_slate
+
+    df = pl.DataFrame({
+        "season": [2026] * 3, "week": [1] * 3, "team": ["KC"] * 3,
+        "player_id": ["a", "b", "c"], "prop": ["receptions"] * 3,
+        "expected": [1.0, 2.0, 3.0], "actual": [1.0, 2.0, 3.0],
+    })
+    real = score_slate.week_completeness
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "log.parquet")
+
+            score_slate.week_completeness = lambda season: {1: 0.125}
+            assert score_slate.append_log(df, path) == 0, "partial week logged"
+            assert not os.path.exists(path), "partial week created the log"
+
+            assert score_slate.append_log(df, path, force=True) == 3, (
+                "force=True did not write")
+
+            os.remove(path)
+            score_slate.week_completeness = lambda season: {1: 1.0}
+            assert score_slate.append_log(df, path) == 3, (
+                "a finished week was refused")
+    finally:
+        score_slate.week_completeness = real

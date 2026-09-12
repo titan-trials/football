@@ -238,8 +238,31 @@ def score_market(season: int, week: int, df: pl.DataFrame):
           "answered.")
 
 
-def append_log(df: pl.DataFrame, path: str = SCORING_LOG) -> int:
-    """Append-only and idempotent: re-running a week replaces its rows."""
+def append_log(df: pl.DataFrame, path: str = SCORING_LOG,
+               min_complete: float = 0.9, force: bool = False) -> int:
+    """
+    Append-only and idempotent: re-running a week replaces its rows.
+
+    REFUSES A HALF-PLAYED WEEK. The completeness guard used to live only in
+    week SELECTION, so `--week N` on a Sunday wrote a partial week into the
+    permanent log and nothing complained. It happened: 2026 week 1 went in
+    with 4 of 32 teams and every aggregate on the dashboard was computed
+    over it until it was noticed.
+
+    A guard on the read path is a suggestion; a guard on the write path is
+    the rule. `force=True` exists for the deliberate case and says so.
+    """
+    season, week = int(df["season"][0]), int(df["week"][0])
+    comp = week_completeness(season).get(week, 1.0)
+    if comp < min_complete and not force:
+        print(f"\n  NOT LOGGED: {season} week {week} is only {comp:.0%} played "
+              f"({min_complete:.0%} needed).\n  The report above still stands "
+              f"-- it just does not go into the permanent log, because a\n  "
+              f"partial week silently re-weights every aggregate computed "
+              f"over it.\n  Re-run after the week finishes, or pass "
+              f"force=True if you mean it.")
+        return pl.read_parquet(path).height if os.path.exists(path) else 0
+
     keep = [c for c in ("season", "week", "team", "player_id", "player_name",
                         "prop", "expected", "actual", "crps", "clean",
                         "availability") if c in df.columns]

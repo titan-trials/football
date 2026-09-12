@@ -112,3 +112,42 @@ def test_home_field_advantage_is_present(lines):
 def test_through_week_cuts():
     g = game_lines(seasons=[2025], through_week=4)
     assert g["week"].max() <= 4
+
+
+def test_information_asymmetry_warning_fires_when_the_model_is_newer():
+    """
+    THE FAIR-TEST GUARD. Re-running the pipeline on Sunday re-predicts every
+    game that has not kicked off, using Thursday's results and Friday's
+    injury report -- while capture skips events already on disk, so those
+    rows keep Wednesday's line.
+
+    The model then holds information the price does not, and the edge it
+    reports is partly just that gap. Same class of error as the
+    clean/tainted split, one level up: there the risk was predicting after
+    kickoff, here it is predicting after the price. Worth catching
+    precisely because it flatters the model, which is the direction nobody
+    checks.
+    """
+    from datetime import datetime, timedelta
+
+    import compare_market as cm
+
+    def frame(hours_later):
+        return pl.DataFrame({
+            "predicted_at": [datetime(2026, 9, 13, 12, 0, 0)] * 3,
+            "captured_at": [
+                (datetime(2026, 9, 13, 12, 0, 0)
+                 - timedelta(hours=hours_later)).strftime(
+                     "%Y-%m-%dT%H:%M:%S.%f+00:00")] * 3,
+        })
+
+    same_day = cm.warn_information_asymmetry(frame(2))
+    assert abs(same_day - 2) < 0.1, "gap mis-measured for a fresh capture"
+
+    stale = cm.warn_information_asymmetry(frame(96))
+    assert abs(stale - 96) < 0.1, "gap mis-measured for a stale capture"
+
+    # missing columns must not raise -- an older edges file has no
+    # predicted_at and should degrade quietly rather than break the report
+    assert np.isnan(cm.warn_information_asymmetry(
+        pl.DataFrame({"captured_at": ["2026-09-13T12:00:00.0+00:00"]})))

@@ -18,6 +18,28 @@ many times as you like.
 
 Add `streamlit run dashboard.py` whenever you want to look at it.
 
+### Once a week, not once a day
+
+Wednesday is the run. Props post midweek, that week's injury report is out,
+and both sides of the comparison get committed at the same moment.
+
+**Re-running mid-week is safe but it is not free of consequences.** Nothing
+breaks -- capture buys nothing it already has, and rows for games that have
+kicked off are preserved. But a Sunday re-run re-predicts the late games
+using Thursday's results and Friday's injury news, while those rows keep
+Wednesday's *line*. The model then knows things the price does not, and
+any edge it reports is partly just that gap. It flatters the model, which
+is the direction nobody thinks to check.
+
+`compare_market` now measures the gap and warns above 24 hours. If you want
+a genuinely updated mid-week slate, re-capture too (`--refresh`) so both
+sides move together, and accept that those rows are a different comparator
+from the rest of the log.
+
+So: **one run a week** while the point is to measure whether the model beats
+the market. Re-run freely once you are using it to look at games rather
+than to score it.
+
 ---
 
 ## `run_slate.py`
@@ -138,7 +160,7 @@ python validate_width.py                         # is the distribution wide enou
 python validate_population.py --tag _roster      # calibration by depth-chart rank
 python k_sweep.py                                # shrinkage strength (settled: no lever)
 python doctor.py                                 # feeds reachable, cache sane
-python -m pytest -q                              # 133 tests
+python -m pytest -q                              # 136 tests
 ```
 
 `compare_props.py` carries flags that exist so a change can be attributed

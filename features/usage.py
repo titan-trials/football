@@ -350,6 +350,174 @@ def estimate_share_concentration(player_games: pl.DataFrame,
     return out, pooled
 
 
+SHARE_GRID = np.round(np.arange(0.0, 1.0001, 0.02), 4)
+
+
+def estimate_share_mixture(player_games: pl.DataFrame,
+                           value_col: str = "opportunities",
+                           trailing: int = 8,
+                           min_rows: int = 100,
+                           grid: np.ndarray = SHARE_GRID) -> dict:
+    """
+    The EMPIRICAL distribution of a role's share, on a fixed grid.
+
+    Returns {(role_pos, role_bucket): (grid, weights, role_mean)}.
+
+    WHY A HISTOGRAM AND NOT A WIDER BETA
+    ------------------------------------
+    The beta-binomial fixed most of the missing width but left QBs at a
+    variance ratio of 0.649 against 0.868 for receivers. The reason is not
+    that the beta was too narrow -- it is that a beta is UNIMODAL and a
+    quarterback's share is not. Measured on 2022-2025, ACT weeks, share of
+    team pass attempts:
+
+        QB1  n=1994  mean 0.922   <0.10: 4.4%   0.10-0.80: 5.7%   >=0.80: 90.0%
+        QB2  n=2073  mean 0.127   <0.10: 82.1%  0.10-0.80: 8.4%   >=0.80: 9.5%
+        QB3  n= 367  mean 0.120   <0.10: 84.2%  0.10-0.80: 5.7%   >=0.80: 10.1%
+        QB4  n= 137  mean 0.000   <0.10: 100%
+
+    QB2's mean is 0.127 and he is at 0.127 essentially never: he throws no
+    passes four weeks in five, and the whole game one week in ten. Any
+    unimodal distribution centred on 0.127 describes a week that does not
+    happen. It gets the mean right and every probability wrong, which is
+    the exact failure this project has now hit three times.
+
+    QB4 is the clean case: 137 player-games, share 0.000, standard
+    deviation 0.000. He has never thrown a pass. The old model gave him
+    8.59 predicted passing yards.
+
+    A histogram needs no assumption about the number of modes, so it
+    represents "0 or 1, rarely between" without being told that is the
+    shape. The cost is resolution -- 51 grid points at 0.02 -- which is
+    finer than the share is knowable.
+
+    WHAT IS CARRIED AND WHAT IS NOT
+    -------------------------------
+    The role's SHAPE is pooled; the player's LEVEL is not. At serve time
+    the grid is rescaled by (his shrunk share / the role mean), so a
+    starter who takes a little less than a typical QB1 keeps that, and the
+    bimodality comes from the role. Scaling rather than replacing matters
+    for positions where the player's own history is the signal -- target
+    share has split-half reliability 0.863, and throwing it away to use a
+    role average would be a much larger loss than the width gain.
+    """
+    need = {"season", "week", "team", "player_id", value_col}
+    missing = need - set(player_games.columns)
+    if missing:
+        raise ValueError(f"player_games missing columns: {sorted(missing)}")
+    if not {"role_pos", "role_bucket"}.issubset(set(player_games.columns)):
+        return {}
+
+    tot = (player_games.group_by(["season", "week", "team"])
+                       .agg(pl.col(value_col).sum().alias("_N")))
+    df = (player_games.join(tot, on=["season", "week", "team"], how="left")
+                      .filter(pl.col("_N") > 0)
+                      .with_columns((pl.col(value_col) / pl.col("_N")).alias("_s")))
+
+    out = {}
+    for (rp, rb), grp in df.group_by(["role_pos", "role_bucket"]):
+        if grp.height < min_rows:
+            continue
+        sv = np.clip(grp["_s"].to_numpy().astype(float), 0.0, 1.0)
+        # Nearest grid point, so a share of exactly 1.0 lands on 1.0 rather
+        # than being spread by a binning convention.
+        idx = np.clip(np.round(sv / (grid[1] - grid[0])).astype(int),
+                      0, len(grid) - 1)
+        w = np.bincount(idx, minlength=len(grid)).astype(float)
+        w /= w.sum()
+        out[(rp, int(rb))] = (grid, w, float(sv.mean()))
+    return out
+
+
+def _fit_multipliers(df: pl.DataFrame, model, value_col: str,
+                     trailing: int, positions: set) -> dict:
+    """
+    Each player's rate expressed as a MULTIPLE of the role he held at the
+    time, rather than as an absolute rate.
+
+        expected_i = sum over his trailing games of role_prior(role held THEN)
+        actual_i   = sum of what he actually got in them
+        mu_i       = (actual_i + k) / (expected_i + k)          -> shrunk to 1
+
+    and at predict time his rate is `mu_i * role_prior(role he holds NOW)`.
+
+    WHY. Every deep bucket over-predicts, in the same direction, across
+    every position: WR7 2.1x, RB4 3.2x, TE4 1.8x, QB3 4.5x. The role
+    PRIORS are not the problem -- measured against what those roles
+    actually produce, they are exact to two decimals. The problem is the
+    player's own history.
+
+    Measured on 2025 week 10, current WR7s:
+
+        mean depth rank over their trailing 8 games     3.56
+        what they averaged in that window               2.631 targets
+        what a WR7 actually averages                    1.131 targets
+                                                        -> 2.33x
+
+    A player at WR7 today was a WR3 or WR4 a month ago, and his own
+    trailing average is a WR3.5 average. `prior_k` is 0.500 -- it sits on
+    its floor, because the estimator correctly reports that players within
+    a role differ a lot and their own history is informative -- so the
+    role prior gets 6% of the weight at n=8 and his stale rate carries the
+    rest. Raising k is the wrong fix: it would flatten the real
+    player-to-player differences the estimator is detecting.
+
+    This is the SAME error that put the WR7 prior at 1.18 targets a game,
+    found and fixed a day earlier, reappearing one level down. There it
+    was the prior that mixed roles; here it is the player's own rate. The
+    general lesson is worth stating plainly: **a rate earned in one role
+    does not transfer to another, and a depth chart is a thing players
+    move around on.**
+
+    What DOES transfer is how good he is relative to whatever role he held,
+    which is what mu_i is. A receiver who earned 1.3x a typical WR3's
+    targets is plausibly a 1.3x WR7 after a demotion; he is not still a
+    WR3. The separation is the point: mu_i is who he is, the role prior is
+    where he is, and only the second one changed.
+
+    A player with no history gets expected_i = 0 and therefore mu_i = 1.0
+    exactly -- his role prior, unchanged. That is the existing behaviour
+    for rookies and it survives, for the same reason it did before: it
+    falls out of `shrink`, not out of a special case.
+    """
+    have_roles = {"role_pos", "role_bucket"}.issubset(set(df.columns))
+    if not have_roles or not positions:
+        return {}
+    df = df.filter(pl.col("role_pos").is_in(sorted(positions)))
+    if df.is_empty():
+        return {}
+
+    # The prior for the role held in THAT game, per row.
+    pri = []
+    for rp, rb, pos in zip(df["role_pos"].to_list(),
+                           df["role_bucket"].to_list(),
+                           df["position"].to_list()):
+        key = None if rp is None or rb is None else (rp, int(rb))
+        pri.append(model._prior_for(key, pos))
+    d = df.with_columns(pl.Series("_exp", pri, dtype=pl.Float64))
+
+    agg = (d.group_by(["team", "player_id"], maintain_order=True)
+             .agg([pl.col(value_col).tail(trailing).sum().alias("_a"),
+                   pl.col("_exp").tail(trailing).sum().alias("_e"),
+                   pl.col(value_col).tail(trailing).len().alias("_n"),
+                   pl.col(value_col).tail(trailing).var().alias("_v")])
+             .filter(pl.col("_n") > 0))
+    if agg.is_empty():
+        return {}
+
+    # k is in units of EXPECTED OPPORTUNITIES, not games: "this many of his
+    # role's opportunities are worth a prior of 1.0x". Estimated the same
+    # method-of-moments way as everything else here.
+    k = estimate_prior_strength_counts(
+        agg["_a"].to_numpy(), np.maximum(agg["_e"].to_numpy(), 1e-9),
+        np.nan_to_num(agg["_v"].to_numpy(), nan=0.0), min_trials=2)
+
+    a, e = agg["_a"].to_numpy(), agg["_e"].to_numpy()
+    mu = (a + k) / (e + k)
+    return {(t, p): float(m) for t, p, m in
+            zip(agg["team"].to_list(), agg["player_id"].to_list(), mu.tolist())}
+
+
 @dataclass
 class ShareModel:
     """
@@ -393,6 +561,18 @@ class ShareModel:
     # case the model behaves exactly as it did before.
     role_concentration: Optional[dict] = None
     global_concentration: Optional[float] = None
+    # (role_pos, role_bucket) -> (grid, weights, role_mean). Present only
+    # for positions listed in SHARE_MIXTURE_POSITIONS.
+    role_mixture: Optional[dict] = None
+    # (team, player_id) -> how many times his ROLE'S rate he earns. None
+    # unless role_relative=True, in which case it replaces the raw rate.
+    multipliers: Optional[dict] = None
+
+    def mixture_for(self, role: Optional[tuple]) -> Optional[tuple]:
+        """The role's empirical share distribution, or None to fall back."""
+        if self.role_mixture is None or role is None:
+            return None
+        return self.role_mixture.get((role[0], int(role[1])))
 
     def concentration_for(self, role: Optional[tuple]) -> Optional[float]:
         """
@@ -417,7 +597,9 @@ class ShareModel:
     @classmethod
     def fit(cls, player_games: pl.DataFrame, value_col: str = "opportunities",
             trailing: int = 8, roles: Optional[pl.DataFrame] = None,
-            share_dispersion: bool = False) -> "ShareModel":
+            share_dispersion: bool = False,
+            mixture_positions: Sequence[str] = (),
+            role_relative: Sequence[str] = ()) -> "ShareModel":
         """
         roles: optional frame with team, player_id, role_pos, role_bucket --
         one row per player, the most recent depth-chart standing the caller
@@ -513,11 +695,21 @@ class ShareModel:
             model.rates[(t, p)] = float(rate)
             model.counts[(t, p)] = (float(s), float(n))
 
+        if role_relative:
+            model.multipliers = _fit_multipliers(df, model, value_col, trailing,
+                                                 set(role_relative))
+
         if share_dispersion:
             rc, pooled = estimate_share_concentration(
                 player_games, value_col=value_col, trailing=trailing)
             model.role_concentration = rc or None
             model.global_concentration = pooled if np.isfinite(pooled) else None
+
+        if mixture_positions:
+            mix = estimate_share_mixture(player_games, value_col=value_col,
+                                         trailing=trailing)
+            keep = {k: v for k, v in mix.items() if k[0] in set(mixture_positions)}
+            model.role_mixture = keep or None
         return model
 
     def _prior_for(self, role: Optional[tuple], position: Optional[str]) -> float:
@@ -535,6 +727,12 @@ class ShareModel:
         a special case.
         """
         key = (team, player_id)
+        if self.multipliers and key in self.multipliers:
+            # ROLE-RELATIVE. His multiplier times the prior for the role he
+            # holds NOW -- so a demotion moves the base and keeps the
+            # player. Only positions in ROLE_RELATIVE_POSITIONS have an
+            # entry; everyone else falls through to the raw rate below.
+            return float(self.multipliers[key] * self._prior_for(role, position))
         if key in self.rates:
             return self.rates[key]
         prior = self._prior_for(role, position)
@@ -611,7 +809,8 @@ def betabinom_matrix(support: np.ndarray, out_support: np.ndarray,
 
 def opportunity_pmf(volume_pmf: np.ndarray, support: np.ndarray,
                     share: float, max_opportunities: int = MAX_OPPORTUNITIES,
-                    share_concentration: Optional[float] = None) -> np.ndarray:
+                    share_concentration: Optional[float] = None,
+                    share_mixture: Optional[tuple] = None) -> np.ndarray:
     """
     Mix Binomial(N, share) over the team-volume pmf:
 
@@ -672,13 +871,70 @@ def opportunity_pmf(volume_pmf: np.ndarray, support: np.ndarray,
         pmf[0] = 1.0
         return pmf
 
-    if share_concentration is None or not np.isfinite(share_concentration):
+    if share_mixture is not None:
+        # EMPIRICAL SHARE MIXTURE. `share_mixture` is (grid, weights,
+        # role_mean) from estimate_share_mixture. The grid is the role's
+        # realised share distribution; it is rescaled so its mean is this
+        # player's share, which keeps his level while borrowing the role's
+        # SHAPE. Beta and beta-binomial are both unimodal and a
+        # quarterback's share is not -- see estimate_share_mixture for the
+        # measurement that forced this.
+        grid, weights, role_mean = share_mixture
+        pts = np.asarray(grid, dtype=float)
+        w = np.asarray(weights, dtype=float).copy()
+        alpha = share / role_mean if role_mean > 0 else 1.0
+
+        # MOVE MASS, NEVER SCALE THE VALUES. Both branches below mix the
+        # role's histogram with a point mass and both preserve the mean
+        # EXACTLY -- asserted in the tests across the whole share range.
+        #
+        # Scaling the grid instead is what the first version did, and it
+        # was wrong twice over. It turns "takes every snap in 80% of weeks"
+        # into "takes 81% of the snaps every week", the smooth unimodal
+        # thing this mixture exists to avoid (measured: QB1 variance ratio
+        # 0.707 -> 0.579, worse than the beta-binomial it replaced). And
+        # scaling UP a distribution already piled at 1.0 has nowhere to go,
+        # so clipping silently ate the mean: at share 1.00, E[T] came back
+        # 30.70 against a true 33.00, and passing yards picked up a -4.86
+        # bias that had not been there before.
+        #
+        # The physical reading is the point. A quarterback's share is a
+        # probability of starting, not a fraction of a start, so to make
+        # him less of a starter you add weeks where he throws nothing, and
+        # to make him more of one you add weeks where he takes every snap.
+        if share <= role_mean:
+            #   alpha * role + (1 - alpha) * delta_0
+            #   mean = alpha * role_mean = share                    [exact]
+            w *= alpha
+            w[0] += 1.0 - alpha
+        else:
+            #   beta * role + (1 - beta) * delta_1,  beta = (1-share)/(1-role_mean)
+            #   mean = beta*role_mean + (1-beta) = 1 - beta(1-role_mean) = share
+            if role_mean >= 1.0 - 1e-9:
+                w = np.zeros_like(w)
+                w[-1] = 1.0
+            else:
+                beta = (1.0 - share) / (1.0 - role_mean)
+                w *= beta
+                w[-1] += 1.0 - beta
+
+        keep = w > 1e-9
+        weights = w
+        pmf = np.zeros(len(out_support))
+        for sj, wj in zip(pts[keep], weights[keep]):
+            if sj <= 0.0:
+                pmf[0] += wj          # a share of exactly zero is zero
+                continue
+            pmf += wj * (volume_pmf @ binom.pmf(
+                out_support[None, :], support[:, None], sj))
+    elif share_concentration is None or not np.isfinite(share_concentration):
         # (len(support), len(out_support)) matrix of Binom(t; N, share)
         mat = binom.pmf(out_support[None, :], support[:, None], share)
+        pmf = volume_pmf @ mat
     else:
         mat = betabinom_matrix(support, out_support, share,
                                float(share_concentration))
-    pmf = volume_pmf @ mat
+        pmf = volume_pmf @ mat
     total = pmf.sum()
     return pmf / total if total > 0 else pmf
 

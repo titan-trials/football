@@ -1458,18 +1458,204 @@ above -- the two are one piece of work, not two.
 
 ---
 
+## The QB mixture (2026-09-12, same day)
+
+SHARE_DISPERSION left quarterbacks at an opportunity variance ratio of
+0.649 against 0.868 for receivers. The residual was not a beta that was too
+narrow. **A beta is unimodal and a quarterback's share is not.**
+
+### The measurement that settled the design
+
+Share of team pass attempts, 2022-2025, ACT weeks only:
+
+    QB1  n=1994  mean 0.922   <0.10:  4.4%   0.10-0.80: 5.7%   >=0.80: 90.0%
+    QB2  n=2073  mean 0.127   <0.10: 82.1%   0.10-0.80: 8.4%   >=0.80:  9.5%
+    QB3  n= 367  mean 0.120   <0.10: 84.2%   0.10-0.80: 5.7%   >=0.80: 10.1%
+    QB4  n= 137  mean 0.000   <0.10:  100%   (sd 0.000 -- never thrown a pass)
+
+QB2's mean is 0.127 and he is at 0.127 **essentially never**: nothing four
+weeks in five, the whole game one week in ten. Any unimodal distribution
+centred on his mean describes a week that does not occur -- right on
+average, wrong at every line. That is now the fourth time this project has
+hit the same shape of error.
+
+QB4 is the clean illustration: 137 player-games, share 0.000, sd 0.000. The
+pre-dispersion model gave him 8.59 predicted passing yards.
+
+### What replaced it
+
+The role's **empirical share histogram** on a 51-point grid, compounded
+over team volume. No assumption about the number of modes, so "0 or 1,
+rarely between" is represented without being told that is the shape.
+Scoped by position (`SHARE_MIXTURE_POSITIONS`), because a WR2's share is
+genuinely unimodal and receivers already measured 0.868.
+
+The player's level is preserved by mixing the role histogram with a point
+mass -- at 0 when his share is below the role mean, at 1 when above:
+
+    share <= role_mean:   alpha*role + (1-alpha)*delta_0,  alpha = share/role_mean
+    share >  role_mean:   beta*role  + (1-beta)*delta_1,   beta  = (1-share)/(1-role_mean)
+
+Both give E[s] = share exactly. The physical reading is the point: a QB's
+share is a probability of starting, not a fraction of a start, so to make
+him less of a starter you add weeks where he throws nothing.
+
+### Two wrong versions first, and what each cost
+
+**1. Scaling the grid values.** The obvious rescale -- multiply every share
+by (his share / role mean) -- turns "takes every snap in 80% of weeks" into
+"takes 81% of the snaps every week". That is the smooth unimodal thing the
+mixture exists to avoid, and it measured worse than what it replaced:
+QB1 variance ratio **0.707 -> 0.579**, below the beta-binomial.
+
+**2. Scaling UP, then clipping.** A distribution already piled at 1.0 has
+nowhere to be scaled to, so the clip silently ate the mean: at share 1.00,
+E[T] came back **30.70 against a true 33.00**, and passing yards picked up
+a **-4.86 bias** on a mean of 70.9 that had not been there before.
+
+**CRPS improved anyway.** The buggy version scored 24.876 against the
+correct version's 26.055 -- the level shift happened to help on this
+sample. A shape change that also moves the level can look better than the
+honest version, and CRPS alone will not tell you. The bias column did, and
+there is now a test asserting E[T] is unchanged at ten shares across the
+whole range.
+
+### Result
+
+    opportunity variance ratio      QB1  0.707 -> 1.031
+                                    QB2  0.464 -> 0.804
+
+    passing_yards   CRPS          26.803 -> 26.055
+                    ranks 1-3     34.393 -> 29.365   (-14.6%)
+                    vs climatology +0.142 -> +0.166
+                    bias           +1.03 -> +0.99, mean ratio 1.010
+
+    receivers       IDENTICAL to four decimals -- the position gate works
+
+Tail calibration, ranks 1-3, mean predicted p against realised base rate,
+in three columns (fixed share / beta-binomial / mixture):
+
+    over 174.5   0.198 -> 0.229 -> 0.256   against 0.257
+    over 224.5   0.112 -> 0.141 -> 0.166   against 0.176
+    over 264.5   0.063 -> 0.084 -> 0.102   against 0.096
+    over 299.5   0.035 -> 0.049 -> 0.060   against 0.044
+
+The systematic under-pricing of QB overs is gone. The signs are mixed
+rather than uniformly negative, and the two most-traded lines are within a
+point. This was the largest single disagreement with the market, and it
+was a modelling error rather than an edge.
+
+### What it did NOT fix
+
+QB3 is still predicted at 2.21 attempts against an actual 0.49, and QB5 at
+8.59 passing yards against 0.00. Its variance ratio went 1.18 -> 2.18,
+over-dispersed -- but the ratio is the wrong complaint, because the problem
+is the MEAN. That is the deep-bucket share prior, the same thing WR7 (2.1x)
+and RB4 (3.2x) show, and the mixture neither touches it nor was meant to.
+**That is now the largest remaining known error.**
+
+---
+
+## The deep-bucket attempt: a mechanism that worked and a hypothesis that
+## did not (2026-09-12)
+
+Every deep bucket over-predicts, same direction, every position: WR7 2.5x,
+RB4 2.5x, TE4 1.5x, QB3 4.5x. The hypothesis was stale rates. It was
+wrong, and ruling it out took three measurements worth keeping.
+
+### The priors are not the problem
+
+Measured against what each role actually produces, the role priors are
+exact:
+
+    role     prior    realised   ratio
+    WR1     6.2333     6.2333     1.00
+    WR7     0.1540     0.1540     1.00
+    RB4     0.3086     0.3086     1.00        (every cell, 1.00)
+
+### Nor is the shrinkage strength
+
+`prior_k` is 0.500 and sits on its FLOOR. Estimated within each role cell
+rather than pooled, it still comes back 0.500 for almost every cell. The
+estimator is correctly reporting that players within a role genuinely
+differ and their own history is informative. Raising k would flatten real
+differences to fix a symptom -- the wrong direction.
+
+### The stale-rate mechanism is real, and fixing it did not help
+
+Current WR7s, 2025 week 10:
+
+    mean depth rank over their trailing 8 games     3.56
+    what they averaged in that window               2.631 targets
+    what a WR7 actually averages                    1.131 targets   -> 2.33x
+
+So the mechanism is confirmed: a player at WR7 today was a WR3 a month ago
+and carries a WR3 average, and with k at 0.5 the role prior gets 6% of the
+weight at n=8. The fix -- express usage as a MULTIPLE of the role held at
+the time, apply it to the role held now -- works exactly as designed:
+
+    current WR7s, mean RAW rate     0.4553  ->  0.1436     (3.2x, on target)
+
+**And the served prediction got WORSE: 2.51x -> 3.44x.**
+
+So the stale rate was never the binding constraint. What the multiplier
+does is replace "his old rank's production" with "full credit for the rank
+he holds now", and for deep receivers the rank he holds now is not worth
+full credit. Ranks below about four turn over constantly, and a
+newly-arrived TE4 does not get what a settled TE4 gets -- TE4 actual 0.239
+against a TE4 prior of 0.647. Promotions moved up more than demotions moved
+down.
+
+### Where it does work
+
+End to end, all positions on:
+
+    passing_yards    26.055 -> 25.399   better
+    rushing_yards     3.465 ->  3.562   worse
+    receiving_yards   6.625 ->  6.736   worse
+
+It helps exactly where depth rank is a real distinction and hurts where it
+is close to arbitrary. QB1 versus QB2 is a fact about the team; WR6 versus
+WR7 is a line on a chart that updates slowly. Gated to QB
+(`ROLE_RELATIVE_POSITIONS = ("QB",)`):
+
+    passing_yards    26.055 -> 25.399   (-2.5%)   skill +0.166 -> +0.187
+    rushing_yards     3.465 ->  3.442   (-0.7%)   skill +0.097 -> +0.103
+    bias unchanged on both; receivers untouched by construction
+
+QB-only beats all-positions on rushing (3.442 vs 3.562) as well as matching
+it on passing, so the gate is not a compromise -- the non-QB part of the
+change was pure cost.
+
+### What this leaves
+
+WR7 2.5x, RB4 2.5x, TE4 1.5x survive. The value of the exercise is that the
+obvious explanation is now ruled out with a measurement rather than an
+argument, and the remaining one is about the depth chart itself: **below
+about rank four the chart may simply not be informative enough to carry a
+prior at all.** If that is right the fix is not a better estimator, it is a
+different feature -- snap share, or a shallower bucket cap -- and it should
+be tested as such rather than by tuning this one further.
+
+Worth noting what the deep buckets are actually worth: WR7 is 1,063 of
+7,599 rows and 0.036 targets a game. Getting it wrong by 2.5x costs
+0.054 targets a row. The books do not price these players. This is a
+correctness issue, not a profitability one, and it should not be allowed to
+consume more time than the market comparison.
+
+---
+
 ## Next
 
 1. Capture week 2 props Wednesday+ (picks up that week's injury report too).
-2. Score week 1 Monday -- now a single command, and it will include the
-   model-vs-market comparison on identical rows. Split week 1 on the
-   SHARE_DISPERSION changeover when pooling.
-3. **A starter/backup mixture for the QB slot.** Closes the remaining
-   width gap (0.649) and the 5.8% share leak at the same time.
-4. **Re-check the other three props' residual width** once the QB mixture
-   lands; receiving at 0.868 may be close enough to leave alone.
-5. ~~Widen the upper tail.~~ Done -- see above.
-6. **Widen the upper tail further if 0.87 is not enough.** The thin-tail finding above is the first
+2. Score week 1 Tuesday -- `python score_slate.py`, no arguments. Split
+   week 1 on the changeover when pooling; it is a mixed slate.
+3. Once ~12-15 weeks are scored, the market comparison is the only number
+   that matters. **Nothing below is worth doing ahead of it.**
+4. Deep buckets, if ever: test whether snap share or a shallower
+   MAX_ROLE_BUCKET beats depth rank below about four. Do not tune the
+   existing estimator further -- that avenue is measured and closed.
+5. Re-check receiver width (0.868); it may be close enough to leave. The thin-tail finding above is the first
    measured defect with a clear mechanism and a clear size. Candidates in
    order of expected value: game-script variance in team volume, then a
    within-game share draw instead of a fixed share.

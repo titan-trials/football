@@ -462,3 +462,235 @@ def test_share_concentration_is_not_estimated_without_roles():
     by_role, pooled = estimate_share_concentration(pg)
     assert by_role == {}
     assert not np.isfinite(pooled)
+
+
+def test_share_mixture_reproduces_a_bimodal_share():
+    """
+    THE QB CASE, in miniature. A backup who throws nothing 80% of weeks and
+    the whole game 20% has a mean share of 0.20 and is at 0.20 never.
+
+    Any unimodal distribution centred on his mean gets E[T] right and every
+    probability wrong -- which is exactly what the beta-binomial does here,
+    and why this is scoped to QB rather than turned on everywhere.
+    """
+    from features.usage import (SHARE_GRID, negbin_pmf, opportunity_pmf)
+
+    support = np.arange(0, 81)
+    vol = negbin_pmf(34.0, 60.0, support)
+
+    w = np.zeros(len(SHARE_GRID))
+    w[0] = 0.80                      # share 0.00
+    w[np.argmin(np.abs(SHARE_GRID - 1.0))] = 0.20
+    mixture = (SHARE_GRID, w, 0.20)
+
+    mix = opportunity_pmf(vol, support, 0.20, share_mixture=mixture)
+    bb = opportunity_pmf(vol, support, 0.20, share_concentration=5.0)
+    t = np.arange(len(mix))
+
+    assert abs(float(mix @ t) - float(bb @ t)) < 0.5, (
+        "the mixture moved the mean; it should only change the shape")
+
+    # the defining property: mass at zero and mass at a full workload
+    assert mix[0] > 0.75, f"P(no attempts) = {mix[0]:.3f}, expected ~0.80"
+    assert mix[25:].sum() > 0.15, "no mass at a starter's workload"
+    assert bb[0] < mix[0], "the beta-binomial should not reproduce the spike"
+    assert bb[25:].sum() < 0.02, (
+        "a unimodal beta should put almost nothing at 34 attempts for a "
+        "player whose mean is 6.8 -- if it does, this test proves nothing")
+
+    assert float(mix @ t ** 2) - float(mix @ t) ** 2 > \
+           float(bb @ t ** 2) - float(bb @ t) ** 2, "mixture is not wider"
+
+
+def test_share_mixture_keeps_the_players_own_level():
+    """
+    The role supplies the SHAPE, the player supplies the LEVEL. The grid is
+    rescaled by (his share / the role mean), so two players in the same
+    role with different shares get different means.
+
+    This is the guard on the scoping decision: pooling the shape is only
+    acceptable because the level survives. Target share has split-half
+    reliability 0.863, and replacing a player's level with his role's would
+    throw away the single most predictive quantity in the model.
+    """
+    from features.usage import SHARE_GRID, negbin_pmf, opportunity_pmf
+
+    support = np.arange(0, 81)
+    vol = negbin_pmf(34.0, 60.0, support)
+    w = np.zeros(len(SHARE_GRID))
+    w[0], w[np.argmin(np.abs(SHARE_GRID - 1.0))] = 0.5, 0.5
+    mixture = (SHARE_GRID, w, 0.50)
+
+    t = np.arange(81)
+    lo = float(opportunity_pmf(vol, support, 0.25, share_mixture=mixture) @ t)
+    hi = float(opportunity_pmf(vol, support, 0.50, share_mixture=mixture) @ t)
+    assert hi > lo * 1.7, (
+        f"doubling the share moved the mean only {lo:.2f} -> {hi:.2f}; the "
+        f"player's level is being ignored")
+
+
+def test_share_mixture_estimator_recovers_the_measured_qb_shape():
+    """
+    Feed the estimator the shape measured on 2022-2025 QB2s -- 82% below
+    0.10, 9.5% at or above 0.80 -- and check it comes back.
+    """
+    from features.usage import estimate_share_mixture
+
+    rng = np.random.default_rng(3)
+    rows = []
+    for g in range(600):
+        u = rng.random()
+        s = 0.0 if u < 0.82 else (1.0 if u < 0.915 else rng.uniform(0.1, 0.8))
+        n = 34
+        rows.append({"season": 2025, "week": 1 + g % 17, "team": f"T{g}",
+                     "player_id": f"qb2_{g}", "opportunities": float(round(n * s)),
+                     "role_pos": "QB", "role_bucket": 2})
+        rows.append({"season": 2025, "week": 1 + g % 17, "team": f"T{g}",
+                     "player_id": f"qb1_{g}", "opportunities": float(n - round(n * s)),
+                     "role_pos": "QB", "role_bucket": 1})
+
+    mix = estimate_share_mixture(pl.DataFrame(rows), min_rows=50)
+    grid, w, mean = mix[("QB", 2)]
+    assert w[grid < 0.10].sum() > 0.75, "lost the spike at zero"
+    assert w[grid >= 0.80].sum() > 0.06, "lost the full-game mode"
+    assert 0.10 < mean < 0.25, f"role mean {mean:.3f} is not the QB2 mean"
+
+
+def test_mixture_positions_gate_is_respected():
+    """
+    Only the listed positions get a mixture. A WR must come back None, so
+    receivers keep the beta-binomial that measured 0.868 for them.
+    """
+    from features.usage import ShareModel
+
+    rows = []
+    for g in range(300):
+        rows.append({"season": 2025, "week": 1 + g % 17, "team": f"T{g % 20}",
+                     "player_id": f"qb{g}", "position": "QB",
+                     "opportunities": float(30 if g % 5 else 0),
+                     "role_pos": "QB", "role_bucket": 1})
+        rows.append({"season": 2025, "week": 1 + g % 17, "team": f"T{g % 20}",
+                     "player_id": f"wr{g}", "position": "WR",
+                     "opportunities": 7.0, "role_pos": "WR", "role_bucket": 1})
+    pg = pl.DataFrame(rows)
+
+    m = ShareModel.fit(pg, trailing=8, mixture_positions=("QB",))
+    assert m.mixture_for(("QB", 1)) is not None, "QB did not get a mixture"
+    assert m.mixture_for(("WR", 1)) is None, "WR got one despite the gate"
+
+    none = ShareModel.fit(pg, trailing=8, mixture_positions=())
+    assert none.mixture_for(("QB", 1)) is None, "gate off still produced one"
+
+
+def test_share_mixture_preserves_the_mean_at_every_share():
+    """
+    THE REGRESSION TEST FOR THE BIAS THE MIXTURE INTRODUCED.
+
+    The mixture is a change of SHAPE. It must leave E[T] = E[N] * share
+    untouched at every share, or it is not a width fix -- it is a silent
+    re-forecast of the level.
+
+    The first version scaled the grid values and clipped at 1.0. Below the
+    role mean that happened to preserve the mean; above it, a distribution
+    already piled at 1.0 had nowhere to be scaled to and clipping ate the
+    difference. At share 1.00 it returned E[T] = 30.70 against a true
+    33.00, and passing yards acquired a -4.86 bias on a mean of 70.9 that
+    had not been there before. CRPS still improved, which is how a level
+    error hides inside a shape improvement.
+
+    Both branches now move MASS -- to zero below the role mean, to one
+    above it -- and both are exact.
+    """
+    from features.usage import SHARE_GRID, negbin_pmf, opportunity_pmf
+
+    sup = np.arange(0, 81)
+    vol = negbin_pmf(33.0, 63.0, sup)
+
+    w = np.zeros(len(SHARE_GRID))
+    w[-1], w[0] = 0.90, 0.044
+    w[np.argmin(np.abs(SHARE_GRID - 0.5))] = 0.056
+    w /= w.sum()
+    role_mean = float(SHARE_GRID @ w)
+    mixture = (SHARE_GRID, w, role_mean)
+    t = np.arange(81)
+
+    for share in (0.02, 0.05, 0.2, 0.5, 0.8, 0.9, role_mean, 0.95, 0.99, 1.0):
+        mix = float(opportunity_pmf(vol, sup, share, share_mixture=mixture) @ t)
+        binom = float(opportunity_pmf(vol, sup, share) @ t)
+        assert abs(mix - binom) < 1e-3, (
+            f"share {share:.3f}: mixture mean {mix:.4f} vs binomial "
+            f"{binom:.4f} -- the mixture moved the level, not just the shape")
+
+    # and it must still be bimodal above the role mean, not collapsed
+    hi = opportunity_pmf(vol, sup, 0.99, share_mixture=mixture)
+    assert hi[0] > 0.001, "lost the did-not-play mass when scaling up"
+
+
+def test_share_mixture_handles_a_degenerate_role():
+    """A role whose share is always 1.0 has no room above it; don't divide by zero."""
+    from features.usage import SHARE_GRID, negbin_pmf, opportunity_pmf
+
+    sup = np.arange(0, 81)
+    vol = negbin_pmf(30.0, 55.0, sup)
+    w = np.zeros(len(SHARE_GRID))
+    w[-1] = 1.0
+    pmf = opportunity_pmf(vol, sup, 1.0, share_mixture=(SHARE_GRID, w, 1.0))
+    assert abs(pmf.sum() - 1.0) < 1e-9
+    assert abs(float(pmf @ np.arange(len(pmf))) - float(vol @ sup)) < 1e-6
+
+
+def test_role_relative_is_position_gated_and_transfers_across_a_demotion():
+    """
+    The multiplier must apply ONLY to listed positions, and within them it
+    must move a player's base when his rank changes.
+
+    The gate is not a nicety. Measured on 2025: role-relative helps passing
+    (CRPS 26.055 -> 25.399) and hurts receiving (6.625 -> 6.736) and
+    rushing (3.465 -> 3.562), because it grants full credit for the rank a
+    player holds now -- right when QB1 vs QB2 is a fact about the team,
+    wrong when WR6 vs WR7 is a slowly-updating line on a chart.
+    """
+    from features.usage import ShareModel
+
+    # Enough teams that every role cell clears the 30-game floor -- below
+    # it the prior falls back to the POSITION rate, which pools starters
+    # and backups and would make this test pass or fail for the wrong
+    # reason.
+    rows = []
+    for t in range(6):
+        for g in range(1, 17):
+            rows.append({"season": 2025, "week": g, "team": f"K{t}",
+                         "player_id": f"qb1_{t}", "position": "QB",
+                         "opportunities": 34.0, "role_pos": "QB",
+                         "role_bucket": 1})
+            rows.append({"season": 2025, "week": g, "team": f"K{t}",
+                         "player_id": f"qb2_{t}", "position": "QB",
+                         "opportunities": 0.0, "role_pos": "QB",
+                         "role_bucket": 2})
+            rows.append({"season": 2025, "week": g, "team": f"B{t}",
+                         "player_id": f"wr1_{t}", "position": "WR",
+                         "opportunities": 9.0, "role_pos": "WR",
+                         "role_bucket": 1})
+            rows.append({"season": 2025, "week": g, "team": f"B{t}",
+                         "player_id": f"wr2_{t}", "position": "WR",
+                         "opportunities": 1.0, "role_pos": "WR",
+                         "role_bucket": 2})
+    pg = pl.DataFrame(rows)
+    m = ShareModel.fit(pg, trailing=8, role_relative=("QB",))
+
+    # QB: he is now a backup, so he gets the BACKUP's base times his own
+    # multiplier -- not his starter-era 34 attempts.
+    demoted_now_backup = m.rate_for("K0", "qb1_0", ("QB", 2), "QB")
+    assert demoted_now_backup < 5.0, (
+        f"a demoted QB kept {demoted_now_backup:.1f} of his starter volume; "
+        f"the multiplier is not being applied to his NEW role")
+
+    # and at his old rank he is still a starter
+    assert m.rate_for("K0", "qb1_0", ("QB", 1), "QB") > 20.0
+
+    # WR: not gated in, so the raw rate stands whatever rank we ask for
+    wr_b1 = m.rate_for("B0", "wr1_0", ("WR", 1), "WR")
+    wr_b2 = m.rate_for("B0", "wr1_0", ("WR", 2), "WR")
+    assert abs(wr_b1 - wr_b2) < 1e-9, (
+        "the WR's rate moved with his rank, so the position gate leaked")
+    assert wr_b1 > 5.0, "the WR lost his own history entirely"

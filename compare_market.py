@@ -110,8 +110,56 @@ def build(season: int, week: int, slate_dir: str = "slates",
         (pl.col("model_prob") - pl.col("market_prob")).alias("edge")
     ).drop(["_pmf", "_support_min"])
 
-    avail = slate.select(["player_id", "prop", "availability"]).unique()
-    return out.join(avail, on=["player_id", "prop"], how="left")
+    avail = slate.select(["player_id", "prop", "availability", "predicted_at",
+                          "kickoff"]).unique()
+    out = out.join(avail, on=["player_id", "prop"], how="left")
+    warn_information_asymmetry(out)
+    return out
+
+
+def warn_information_asymmetry(df: pl.DataFrame, hours: float = 24.0) -> float:
+    """
+    Warn when the model saw the world later than the captured line did.
+
+    THE COMPARISON IS ONLY FAIR IF BOTH SIDES WERE COMMITTED AT THE SAME
+    TIME. Re-running the pipeline on Sunday re-predicts every game that has
+    not kicked off, using Thursday's results and Friday's injury report --
+    but capture skips events already on disk, so those rows keep Wednesday's
+    line. The model then holds information the price does not, and any edge
+    it reports is partly just that gap.
+
+    This is the same class of error as the clean/tainted split, one level
+    up: there the risk was predicting after kickoff, here it is predicting
+    after the price. It is worth catching because it flatters the model,
+    which is the direction nobody checks.
+
+    Returns the median gap in hours. Reports rather than raises -- a stale
+    line is still worth looking at, it just is not evidence.
+    """
+    if not {"predicted_at", "captured_at"}.issubset(set(df.columns)):
+        return float("nan")
+    d = df.with_columns([
+        pl.col("predicted_at").cast(pl.Datetime("us")).alias("_p"),
+        pl.col("captured_at").str.to_datetime(
+            "%Y-%m-%dT%H:%M:%S%.f%:z", strict=False)
+          .dt.convert_time_zone("UTC").dt.replace_time_zone(None).alias("_c"),
+    ]).drop_nulls(["_p", "_c"])
+    if d.is_empty():
+        return float("nan")
+    gap = ((d["_p"] - d["_c"]).dt.total_seconds() / 3600.0).to_numpy()
+    med = float(np.median(gap))
+    if med > hours:
+        n_stale = int((gap > hours).sum())
+        print(f"\n  !! STALE LINES: the model was run a median {med:.0f}h "
+              f"AFTER these lines were captured\n"
+              f"     ({n_stale} of {len(gap)} rows over {hours:.0f}h). The "
+              f"model has seen results and injury\n"
+              f"     news the price has not, so the edges below are not a "
+              f"fair test and will\n"
+              f"     flatter the model. Re-capture with --refresh, or treat "
+              f"this slate as a\n"
+              f"     forecast rather than as evidence.")
+    return med
 
 
 def report(df: pl.DataFrame, top: int = 15):
