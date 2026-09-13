@@ -3,12 +3,22 @@ football_props dashboard.
 
     streamlit run dashboard.py
 
-Four views, each answering one question in plain language:
+A GAME DAY picker at the top, then four tabs:
 
-    This Week     who does the model like, and by how much?
-    vs The Book   where do we disagree with the price, and is that real?
-    Track Record  when the games were played, was it right?
-    Model Health  what is known to be wrong right now?
+    Betting Board    the players with a posted line, for the chosen day
+    All Projections  every player the model projects, for lookup
+    Track Record     when the games were played, was it right?
+    Model Health     what is known to be wrong right now?
+
+THE DAY PICKER IS THE PRIMARY CONTROL. "I want to bet on Sunday, who do I
+look at" is the question this exists to answer, and the previous version
+could not be asked it: a week was one undifferentiated pile of 2,631 rows
+with no way to narrow to a day.
+
+BOARD AND PROJECTIONS ARE SEPARATE ON PURPOSE. The slate projects 632
+players across six props; books price 157 of them across two. Mixing
+those in one table meant scrolling past hundreds of unbettable rows to
+reach the handful that matter.
 
 DESIGN NOTES
 ------------
@@ -104,6 +114,13 @@ CSS = f"""
           color:{INK_2}; margin-bottom:1rem; }}
   .lede b {{ color:{INK}; }}
 
+  .games {{ display:flex; gap:.45rem; flex-wrap:wrap; margin:.2rem 0 .4rem; }}
+  .game {{ display:inline-flex; align-items:center; gap:.35rem;
+          background:{SURFACE}; border:1px solid {GRID}; border-radius:8px;
+          padding:.28rem .55rem; font-size:.8rem; color:{INK_2}; }}
+  .game b {{ color:{INK}; font-weight:600; }}
+  .game .t {{ color:{INK_3}; font-variant-numeric:tabular-nums; }}
+
   .rowlab {{ font-variant-numeric:tabular-nums; }}
   code {{ font-size:.85em; }}
   [data-testid="stMetricValue"] {{ font-size:1.4rem; }}
@@ -190,157 +207,267 @@ def leaderboard_chart(df: pd.DataFrame, value: str, label: str,
 
 # --- views -------------------------------------------------------------
 
-def games_panel(df: pd.DataFrame, season: int, week: int):
+ET = "America/New_York"
+
+
+def to_et(series) -> pd.Series:
     """
-    The week's actual schedule, with what has already happened.
+    Kickoffs as EASTERN wall-clock, which is how a game day is named.
 
-    THIS PANEL EXISTS BECAUSE THE PAGE WAS CONFUSING WITHOUT IT. It said
-    "16 games" and stopped, which invites the reasonable question "but
-    aren't some of those today?" An NFL week is not a calendar week -- week
-    1 of 2026 runs Wednesday the 9th through Monday the 14th -- so a slate
-    routinely holds games that are finished, games kicking off in an hour,
-    and games two days away, all at once.
+    Not cosmetic. Sunday Night Football kicks off 20:20 Eastern, which is
+    00:20 UTC the NEXT DAY, so grouping games by their UTC date files SNF
+    under Monday and Monday Night Football under Tuesday. Anyone looking
+    for "Sunday's games" would not find half of them.
     """
-    if "kickoff" not in df.columns or "game_id" not in df.columns:
+    t = pd.to_datetime(series, utc=True, errors="coerce")
+    return t.dt.tz_convert(ET)
+
+
+def day_options(slate: pd.DataFrame) -> pd.DataFrame:
+    """One row per game day: the Eastern date, its games, and its status."""
+    if "kickoff" not in slate.columns:
+        return pd.DataFrame()
+    k = slate.dropna(subset=["kickoff"]).copy()
+    k["et"] = to_et(k["kickoff"])
+    k["date"] = k["et"].dt.date
+    now_et = pd.Timestamp.now(tz="UTC").tz_convert(ET)
+
+    g = (k.groupby(["date", "game_id"])["et"].min().reset_index()
+           .groupby("date")
+           .agg(games=("game_id", "nunique"), first=("et", "min"),
+                last=("et", "max"))
+           .reset_index())
+    # A day is done when its last game kicked off more than ~3.5 hours ago.
+    g["done"] = (now_et - g["last"]).dt.total_seconds() / 3600.0 > 3.5
+    g["label"] = g.apply(
+        lambda r: f"{r['first']:%a %d %b} · {r['games']} game"
+                  f"{'s' if r['games'] != 1 else ''}"
+                  f"{'  ✓' if r['done'] else ''}", axis=1)
+    return g.sort_values("date")
+
+
+def filter_to_day(df: pd.DataFrame, day, time_col: str = "kickoff"):
+    if day is None or time_col not in df.columns:
+        return df
+    d = df.dropna(subset=[time_col]).copy()
+    return d[to_et(d[time_col]).dt.date == day]
+
+
+def game_label(df: pd.DataFrame) -> pd.Series:
+    """'AWAY @ HOME' from a game_id like 2026_01_NE_SEA."""
+    return df["game_id"].str.split("_").map(
+        lambda p: f"{p[2]} @ {p[3]}" if isinstance(p, list) and len(p) >= 4 else "")
+
+
+# ---------------------------------------------------------------------
+# 1. THE BOARD -- what you can actually bet on
+# ---------------------------------------------------------------------
+
+def view_board(slate: pd.DataFrame, season: int, week: int, day, day_name: str):
+    """
+    Only rows with a POSTED LINE. This is the page that answers "I want to
+    bet on Sunday, who do I look at".
+
+    WHY IT IS SEPARATE FROM PROJECTIONS, which was the single biggest
+    source of confusion in the previous version: the slate holds 2,631
+    projections across 632 players and six props, and **596 of them across
+    157 players and two props have a line you can actually bet**. Showing
+    them in one table meant scrolling past hundreds of unbettable rows to
+    find the handful that matter. A projection for a player no book prices
+    is a research output, not a betting one.
+    """
+    edges = load_parquet(os.path.join(CACHE_DIR, f"edges_{season}_wk{week}.parquet"))
+    if edges is None or edges.empty:
+        st.info(
+            f"**No posted lines captured for week {week} yet.**\n\n"
+            f"Run `python run_slate.py` — it buys the week's lines, rebuilds "
+            f"the slate and fills this page. Props post around Wednesday; "
+            f"before that the books come back empty, which is not an error.")
         return
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    g = (df.dropna(subset=["kickoff"])
-           .groupby("game_id")
-           .agg(kickoff=("kickoff", "min"),
-                teams=("team", lambda s: " @ ".join(sorted(set(s))[:2])),
-                players=("player_id", "nunique"))
-           .reset_index()
-           .sort_values("kickoff"))
-    if g.empty:
+    e = edges.copy()
+    e["et"] = to_et(e["commence_time"])
+    if day is not None:
+        e = e[e["et"].dt.date == day]
+    if e.empty:
+        st.info(f"No posted lines for {day_name}.")
         return
 
-    # Kicked off more than ~3.5 hours ago is over; inside that window it is
-    # being played right now. An NFL game runs about three hours.
-    mins = (now - g["kickoff"]).dt.total_seconds() / 60.0
-    g["status"] = np.where(mins > 210, "Final",
-                  np.where(mins >= 0, "Playing now", "Upcoming"))
-    g["when"] = g["kickoff"].dt.strftime("%a %d %b · %H:%M UTC")
-    g["in_hours"] = (-mins / 60.0).round(1)
+    # attach the game each line belongs to, via the slate
+    gid = (slate[["team", "game_id"]].drop_duplicates()
+           if "game_id" in slate.columns else None)
+    if gid is not None:
+        e = e.merge(gid, on="team", how="left")
+        e["game"] = game_label(e)
+    else:
+        e["game"] = ""
 
-    n_up = int((g["status"] == "Upcoming").sum())
-    n_now = int((g["status"] == "Playing now").sum())
-    n_done = int((g["status"] == "Final").sum())
+    e["side"] = np.where(e["edge"] >= 0, "OVER", "UNDER")
+    e["gap"] = e["edge"].abs()
+    e["kick"] = e["et"].dt.strftime("%a %-I:%M %p ET")
 
-    # <b>, not ** -- this string goes inside an HTML block, where markdown
-    # bold renders as literal asterisks.
-    bits = []
-    if n_done:
-        bits.append(f"<b>{n_done} already played</b>")
-    if n_now:
-        bits.append(f"<b>{n_now} being played right now</b>")
-    if n_up:
-        nxt = g[g["status"] == "Upcoming"].iloc[0]
-        bits.append(f"<b>{n_up} still to come</b> — next in "
-                    f"{nxt['in_hours']:.0f}h ({nxt['when']})")
-    st.markdown(
-        '<div class="lede">'
-        f"An NFL week is not a calendar week. <b>Week {week}</b> runs "
-        f"{g['kickoff'].min():%a %d %b} to {g['kickoff'].max():%a %d %b}, and "
-        f"right now: " + ", ".join(bits) + ". Every one of these games is in "
-        "the slate below."
-        "</div>", unsafe_allow_html=True)
-
-    ICON = {"Final": "✓", "Playing now": "●", "Upcoming": "○"}
-    g["st"] = g["status"].map(ICON) + "  " + g["status"]
-    st.dataframe(
-        g[["st", "teams", "when", "players"]],
-        use_container_width=True, hide_index=True, height=min(430, 38 * len(g) + 40),
-        column_config={
-            "st": st.column_config.TextColumn("Status", width="small"),
-            "teams": st.column_config.TextColumn("Game", width="small"),
-            "when": st.column_config.TextColumn("Kickoff", width="medium"),
-            "players": st.column_config.NumberColumn(
-                "Players projected", format="%d"),
-        })
-    st.caption(
-        "Times are UTC — Eastern is UTC−4 in September, Pacific UTC−7. "
-        "Projections for a game that has already kicked off are frozen as "
-        "they were committed beforehand; re-running never overwrites them.")
-
-
-def view_week(path: str, df: pd.DataFrame):
-    season, week = season_week(path)
-
-    n_clean = int(df["clean"].sum()) if "clean" in df else 0
-    flagged = int((df["availability"] != "CLEAR").sum()) if "availability" in df else 0
-    stamp = df["predicted_at"].max() if "predicted_at" in df else None
-    games = df["game_id"].nunique() if "game_id" in df else 0
+    big = int((e["gap"] >= 0.10).sum())
     cards([
-        ("Games", f"{games}", f"{df['team'].nunique()} teams this week"),
-        ("Players", f"{df['player_id'].nunique():,}", f"{len(df):,} projections"),
-        ("Locked in", f"{n_clean:,}", "committed before kickoff"),
-        ("Injury-flagged", f"{flagged:,}", "rows carrying a report"),
-        ("Built", str(stamp)[5:16] if stamp is not None else "—", "UTC"),
+        ("Bettable props", f"{len(e):,}", f"{day_name}"),
+        ("Players priced", f"{e['player_id'].nunique()}",
+         f"across {e['game'].nunique()} games"),
+        ("We disagree ≥10 pts", f"{big}",
+         "worth a look — and a bug check"),
+        ("Book hold", f"{float(e['hold'].mean()):.1%}",
+         "the vig, already removed"),
     ])
 
-    if "availability" in df and flagged == 0:
-        st.warning(
-            "Every player reads CLEAR. If this week's injury report has not "
-            "published yet that means the report is **absent**, not that "
-            "everyone is healthy. Re-run after Wednesday.")
+    st.markdown(
+        '<div class="lede">'
+        "<b>These are the only players with a line you can bet.</b> The "
+        "slate projects everyone; the books price a fraction of them. Sort "
+        "by <b>Gap</b> to see where the model and the book disagree most — "
+        "but read those as places to check for a bug first, since the model "
+        "has no demonstrated edge over a closing line yet."
+        "</div>", unsafe_allow_html=True)
 
-    st.subheader("This week's games")
-    games_panel(df, season, week)
-    st.divider()
+    f1, f2, f3 = st.columns([3, 2, 2])
+    games = sorted(g for g in e["game"].unique() if g)
+    pick_games = f1.multiselect("Game", games, placeholder="All games")
+    props = sorted(e["prop"].unique())
+    pick_prop = f2.multiselect("Prop", props, format_func=fmt,
+                               placeholder="All props")
+    min_books = f3.slider("Minimum books quoting", 1, 5, 2,
+                          help="A single-book line is much weaker evidence "
+                               "than a five-book consensus.")
+
+    v = e[e["n_books"] >= min_books]
+    if pick_games:
+        v = v[v["game"].isin(pick_games)]
+    if pick_prop:
+        v = v[v["prop"].isin(pick_prop)]
+    if v.empty:
+        st.info("Nothing matches those filters.")
+        return
+
+    v = v.sort_values("gap", ascending=False).copy()
+    v["prop_label"] = v["prop"].map(fmt)
+    # PERCENTAGE POINTS, NOT FRACTIONS. Streamlit's ProgressColumn applies
+    # the format string to the RAW value, so a 0-1 probability with
+    # "%.0f%%" renders every row as "0%" -- which is what the first version
+    # of this table did, for all 546 rows.
+    for c in ("model_prob", "market_prob", "gap"):
+        v[c] = v[c] * 100.0
+
+    st.dataframe(
+        v[["matched_name", "prop_label", "line", "side", "gap",
+           "model_prob", "market_prob", "n_books", "game", "kick",
+           "availability"]],
+        use_container_width=True, hide_index=True, height=560,
+        column_config={
+            "matched_name": st.column_config.TextColumn("Player", width="medium"),
+            "prop_label": st.column_config.TextColumn("Prop", width="small"),
+            "line": st.column_config.NumberColumn("Line", format="%.1f",
+                                                  width="small"),
+            "side": st.column_config.TextColumn(
+                "We lean", width="small",
+                help="Which side of the line the model prefers"),
+            "gap": st.column_config.NumberColumn(
+                "Gap", format="%.0f pts", width="small",
+                help="How far apart the model and the book are, in "
+                     "percentage points. Sort by this."),
+            "model_prob": st.column_config.ProgressColumn(
+                "Model P(over)", min_value=0.0, max_value=100.0,
+                format="%.0f%%"),
+            "market_prob": st.column_config.ProgressColumn(
+                "Book P(over)", min_value=0.0, max_value=100.0,
+                format="%.0f%%"),
+            "n_books": st.column_config.NumberColumn("Books", format="%d",
+                                                     width="small"),
+            "game": st.column_config.TextColumn("Game", width="small"),
+            "kick": st.column_config.TextColumn("Kickoff", width="small"),
+            "availability": st.column_config.TextColumn("Status", width="small"),
+        })
+    st.caption(
+        "**Model P(over)** is the model's probability the player goes over "
+        "that line. **Book P(over)** is the same thing implied by the price, "
+        "with the vig removed. **Gap** is the distance between them, in "
+        "percentage points — click the column header to sort.")
+
+
+# ---------------------------------------------------------------------
+# 2. PROJECTIONS -- everyone, priced or not
+# ---------------------------------------------------------------------
+
+def view_projections(slate: pd.DataFrame, season: int, week: int, day,
+                     day_name: str):
+    df = filter_to_day(slate, day)
+    if df.empty:
+        st.info(f"No projections for {day_name}.")
+        return
+
+    edges = load_parquet(os.path.join(CACHE_DIR, f"edges_{season}_wk{week}.parquet"))
+    priced = set() if edges is None or edges.empty else set(edges["player_id"])
+
+    st.markdown(
+        '<div class="lede">'
+        "Every player the model projects, whether a book prices him or not. "
+        "Use this to look someone up. For what you can actually bet, use the "
+        "<b>Betting Board</b> tab."
+        "</div>", unsafe_allow_html=True)
 
     props = [p for p in PROP_LABEL if p in set(df["prop"])]
     props += [p for p in sorted(set(df["prop"])) if p not in props]
 
     left, right = st.columns([3, 2], gap="large")
-
     with left:
-        st.subheader("Who the model likes")
+        st.markdown("#### Top projections")
         c1, c2 = st.columns([3, 2])
         prop = c1.selectbox("Prop", props, format_func=fmt, key="lb_prop")
         topn = c2.slider("Show", 5, 30, 12, key="lb_n")
-
-        sub = df[df["prop"] == prop].copy()
-        if "availability" in sub.columns:
-            healthy = st.checkbox("Hide injury-flagged players", value=False)
-            if healthy:
-                sub = sub[sub["availability"] == "CLEAR"]
+        only_priced = st.checkbox(
+            "Only players with a posted line", value=False,
+            help="Narrows to the players a book actually prices.")
+        sub = df[df["prop"] == prop]
+        if only_priced and priced:
+            sub = sub[sub["player_id"].isin(priced)]
         top = sub.nlargest(topn, "expected")
         if top.empty:
-            st.info("Nothing projected for this prop.")
+            st.info("Nothing projected here.")
         else:
             st.altair_chart(
                 leaderboard_chart(top, "expected", fmt(prop),
                                   PROP_UNIT.get(prop, "")),
                 use_container_width=True)
             st.caption(
-                f"Projected {fmt(prop).lower()} — the model's **average** "
-                f"outcome, not its most likely one. These distributions are "
-                f"right-skewed, so the median sits below the mean.")
+                f"The model's **average** outcome, not its most likely one — "
+                f"these distributions are right-skewed, so the median sits "
+                f"below the mean.")
 
     with right:
-        st.subheader("Most likely to score")
-        td = load_parquet(path.replace("slate_", "anytime_td_"))
+        st.markdown("#### Most likely to score")
+        td = load_parquet(os.path.join(
+            SLATE_DIR, f"anytime_td_{season}_wk{week}.parquet"))
         if td is None or td.empty:
             st.info("No anytime-TD file for this slate.")
         else:
-            t = td.nlargest(12, "anytime_td").copy()
-            st.altair_chart(
-                leaderboard_chart(t, "anytime_td", "P(scores a TD)", "TD",
-                                  color=C_CLIM),
-                use_container_width=True)
-            st.caption(
-                "P(anytime) = 1 − P(no receiving TD) × P(no rushing TD). The "
-                "two are treated as independent, which slightly **understates** "
-                "goal-line backs — the players the book prices most sharply.")
+            teams = set(df["team"])
+            t = td[td["team"].isin(teams)].nlargest(12, "anytime_td")
+            if t.empty:
+                st.info("No TD projections for these teams.")
+            else:
+                st.altair_chart(
+                    leaderboard_chart(t, "anytime_td", "P(scores a TD)", "TD",
+                                      color=C_CLIM),
+                    use_container_width=True)
+                st.caption(
+                    "P(anytime) = 1 − P(no receiving TD) × P(no rushing TD), "
+                    "treated as independent — which slightly **understates** "
+                    "goal-line backs.")
 
     st.divider()
-    st.subheader("Look up a player")
+    st.markdown("#### Look up a player")
     f1, f2, f3 = st.columns([2, 2, 3])
-    fprop = f1.multiselect("Prop", props, format_func=fmt, key="tbl_prop")
-    fteam = f2.multiselect("Team", sorted(df["team"].unique()), key="tbl_team")
-    search = f3.text_input("Name contains", key="tbl_q",
-                           placeholder="e.g. Nacua")
+    fprop = f1.multiselect("Prop", props, format_func=fmt, key="tbl_prop",
+                           placeholder="All props")
+    fteam = f2.multiselect("Team", sorted(df["team"].unique()), key="tbl_team",
+                           placeholder="All teams")
+    search = f3.text_input("Name contains", key="tbl_q", placeholder="e.g. Nacua")
 
     t = df
     if fprop:
@@ -352,118 +479,70 @@ def view_week(path: str, df: pd.DataFrame):
 
     show = t.copy()
     show["prop"] = show["prop"].map(fmt)
+    show["bet"] = np.where(show["player_id"].isin(priced), "✓", "")
     if "kickoff" in show.columns:
-        show["kicks"] = pd.to_datetime(show["kickoff"]).dt.strftime("%a %H:%M")
+        show["kicks"] = to_et(show["kickoff"]).dt.strftime("%a %-I:%M %p")
     cols = [c for c in ["player_name", "team", "kicks", "position", "prop",
-                        "expected", "exp_opportunities", "availability"]
-            if c in show.columns]
-    line_cols = [c for c in show.columns if c.startswith("over_")]
-    show = show.sort_values("expected", ascending=False)[cols + line_cols]
+                        "expected", "bet", "availability"] if c in show.columns]
+    show = show.sort_values("expected", ascending=False)[cols]
     st.dataframe(
         show, use_container_width=True, hide_index=True, height=420,
         column_config={
             "player_name": st.column_config.TextColumn("Player", width="medium"),
             "team": st.column_config.TextColumn("Tm", width="small"),
-            "kicks": st.column_config.TextColumn(
-                "Kickoff", width="small", help="UTC"),
+            "kicks": st.column_config.TextColumn("Kickoff", width="small",
+                                                 help="Eastern"),
             "position": st.column_config.TextColumn("Pos", width="small"),
             "prop": st.column_config.TextColumn("Prop", width="medium"),
             "expected": st.column_config.NumberColumn("Projected", format="%.1f"),
-            "exp_opportunities": st.column_config.NumberColumn(
-                "Opps", format="%.1f",
-                help="Targets, carries or attempts the model expects"),
+            "bet": st.column_config.TextColumn(
+                "Line?", width="small",
+                help="✓ means a book posted a line — see the Betting Board"),
             "availability": st.column_config.TextColumn("Status", width="small"),
-            **{c: st.column_config.ProgressColumn(
-                f"o{c[5:]}", min_value=0.0, max_value=1.0, format="%.2f")
-               for c in line_cols},
         })
-    st.caption(
-        "`o24.5` is the model's probability of going **over** that line. "
-        "Columns are empty for props where the line does not apply.")
 
 
-def view_market(path: str):
-    season, week = season_week(path)
-    edges = load_parquet(os.path.join(CACHE_DIR, f"edges_{season}_wk{week}.parquet"))
-    if edges is None or edges.empty:
-        st.info(
-            "No captured lines for this week yet.\n\n"
-            "Run **`python run_slate.py`** on Wednesday — it buys the lines, "
-            "builds the slate and computes this page in one go. Props post "
-            "midweek; before that the markets come back empty, which is not "
-            "an error.")
+# ---------------------------------------------------------------------
+# The day strip
+# ---------------------------------------------------------------------
+
+def day_header(slate: pd.DataFrame, days: pd.DataFrame, day):
+    """The chosen day's games, with kickoff times and whether they are done."""
+    if "kickoff" not in slate.columns or day is None:
         return
+    k = slate.dropna(subset=["kickoff"]).copy()
+    k["et"] = to_et(k["kickoff"])
+    k = k[k["et"].dt.date == day]
+    if k.empty:
+        return
+    now_et = pd.Timestamp.now(tz="UTC").tz_convert(ET)
 
-    mean_edge = float(edges["edge"].mean())
-    st.markdown(
-        '<div class="lede">'
-        "<b>Read this page as a bug-finder, not a bet list.</b> A large average "
-        "edge almost always means a units or scope problem rather than free "
-        "money — and the current average is far from zero. Two known causes are "
-        "already measured: the model's distributions are right-skewed by ~4.5 "
-        "units, so a line near the expectation correctly prices below 0.50; and "
-        "the book's lines sit ~2.4 above the model's mean, which is a real "
-        "level gap in the book's favour."
-        "</div>", unsafe_allow_html=True)
+    g = (k.groupby("game_id")
+           .agg(et=("et", "min"), players=("player_id", "nunique"))
+           .reset_index())
+    g["game"] = game_label(g)
+    g["mins"] = (now_et - g["et"]).dt.total_seconds() / 60.0
+    g["status"] = np.where(g["mins"] > 210, "Final",
+                  np.where(g["mins"] >= 0, "Playing now", "Upcoming"))
+    g["when"] = g["et"].dt.strftime("%-I:%M %p ET")
+    g = g.sort_values("et")
 
-    cards([
-        ("Priced props", f"{len(edges):,}",
-         f"{edges['player_id'].nunique()} players"),
-        ("Average edge", f"{mean_edge:+.3f}",
-         "model probability − book probability"),
-        ("Book hold", f"{float(edges['hold'].mean()):.2%}",
-         "the vig, already removed"),
-        ("Books quoted", f"{float(edges['n_books'].mean()):.1f}",
-         "average per line"),
-    ])
+    ICON = {"Final": "✓", "Playing now": "●", "Upcoming": "○"}
+    chips = "".join(
+        f'<span class="game">{ICON[r["status"]]} <b>{r["game"]}</b> '
+        f'<span class="t">{r["when"]}</span></span>'
+        for r in g.to_dict("records"))
+    st.markdown(f'<div class="games">{chips}</div>', unsafe_allow_html=True)
 
-    dist = edges[["edge"]].copy()
-    hist = alt.Chart(dist).mark_bar(color=C_MODEL, opacity=0.85).encode(
-        x=alt.X("edge:Q", bin=alt.Bin(maxbins=40), title="Edge (model − book)",
-                axis=alt.Axis(gridColor=GRID, domainColor=GRID,
-                              labelColor=INK_3, titleColor=INK_2, format="+.2f")),
-        y=alt.Y("count():Q", title="Priced props",
-                axis=alt.Axis(gridColor=GRID, domainColor=GRID,
-                              labelColor=INK_3, titleColor=INK_2)),
-        tooltip=[alt.Tooltip("count():Q", title="props")])
-    zero = alt.Chart(pd.DataFrame({"x": [0.0]})).mark_rule(
-        color=INK_3, strokeDash=[5, 4], strokeWidth=1.5).encode(x="x:Q")
-    st.altair_chart((hist + zero).properties(height=250)
-                    .configure_view(stroke=None), use_container_width=True)
-    st.caption(
-        "Dashed line is perfect agreement. A healthy distribution is centred "
-        "there and two-sided; this one is shifted left, which is the open "
-        "question week 1's results will settle.")
-
-    st.subheader("Biggest disagreements")
-    side = st.radio("Direction", ["Model says OVER", "Model says UNDER"],
-                    horizontal=True, label_visibility="collapsed")
-    e = edges.copy()
-    e["prop"] = e["prop"].map(fmt)
-    e = e.nlargest(15, "edge") if side.endswith("OVER") else e.nsmallest(15, "edge")
-    e = e.sort_values("edge", ascending=not side.endswith("OVER"))
-
-    st.dataframe(
-        e[["matched_name", "team", "prop", "line", "model_prob", "market_prob",
-           "edge", "n_books", "availability"]],
-        use_container_width=True, hide_index=True,
-        column_config={
-            "matched_name": st.column_config.TextColumn("Player", width="medium"),
-            "team": st.column_config.TextColumn("Tm", width="small"),
-            "prop": st.column_config.TextColumn("Prop", width="medium"),
-            "line": st.column_config.NumberColumn("Line", format="%.1f"),
-            "model_prob": st.column_config.ProgressColumn(
-                "Model", min_value=0.0, max_value=1.0, format="%.3f"),
-            "market_prob": st.column_config.ProgressColumn(
-                "Book", min_value=0.0, max_value=1.0, format="%.3f"),
-            "edge": st.column_config.NumberColumn("Edge", format="%+.3f"),
-            "n_books": st.column_config.NumberColumn("Books", format="%d"),
-            "availability": st.column_config.TextColumn("Status", width="small"),
-        })
-    st.caption(
-        "A single-book line is a much weaker number than a five-book "
-        "consensus. Check the **Books** column before taking any row "
-        "seriously.")
+    upcoming = g[g["status"] == "Upcoming"]
+    if not upcoming.empty:
+        nxt = upcoming.iloc[0]
+        hrs = -nxt["mins"] / 60.0
+        st.caption(f"Next kickoff: **{nxt['game']}** in {hrs:.0f} hours "
+                   f"({nxt['when']}).  ✓ final · ● playing now · ○ upcoming")
+    else:
+        st.caption("Every game on this day has kicked off.  "
+                   "✓ final · ● playing now · ○ upcoming")
 
 
 def view_record():
@@ -1014,46 +1093,67 @@ def main():
         return
 
     with st.sidebar:
-        st.markdown("### Slate")
+        st.markdown("### Week")
         path = st.selectbox(
             "Week", slates, label_visibility="collapsed",
             format_func=lambda p: (lambda sw: f"{sw[0]} · Week {sw[1]}")(
                 season_week(p)))
-        st.caption("Older weeks stay on disk exactly as they were committed.")
+        st.caption(
+            "An NFL week runs Thursday to Monday, so one week holds several "
+            "game days. Older weeks stay on disk exactly as committed.")
 
-    df = load_parquet(path)
+    slate = load_parquet(path)
     season, week = season_week(path)
+    if slate is None or slate.empty:
+        st.warning("Empty slate.")
+        return
 
     st.markdown(
         f'<div class="hdr"><h1>🏈 Football Props</h1>'
         f'<span class="wk">{season} · Week {week}</span></div>',
         unsafe_allow_html=True)
 
+    # THE DAY PICKER IS THE PRIMARY CONTROL. "I want to bet on Sunday" is
+    # the question this dashboard exists to answer, and in the previous
+    # version there was no way to ask it -- the whole week was one
+    # undifferentiated pile of 2,631 rows.
+    days = day_options(slate)
+    day, day_name = None, f"week {week}"
+    if not days.empty:
+        labels = ["Whole week"] + days["label"].tolist()
+        default = 0
+        live = days[~days["done"]]
+        if not live.empty:
+            default = int(days.index.get_loc(live.index[0])) + 1
+        choice = st.radio("Game day", labels, index=default, horizontal=True,
+                          label_visibility="collapsed")
+        if choice != "Whole week":
+            row = days[days["label"] == choice].iloc[0]
+            day, day_name = row["date"], choice.split(" ·")[0]
+
     edges_path = os.path.join(CACHE_DIR, f"edges_{season}_wk{week}.parquet")
     log = load_parquet(os.path.join(CACHE_DIR, "scoring_log.parquet"))
     n_weeks = 0 if log is None or log.empty else len(
         log[["season", "week"]].drop_duplicates())
-
     st.markdown(
         '<div class="strip">'
-        + pill("crit", "◆ No proven edge over the book")
+        + pill("crit", "◆ No proven edge over the book — read this as research")
         + pill("info", f"◆ {n_weeks} week{'s' if n_weeks != 1 else ''} scored "
                        f"of ~12–15 needed")
         + pill("ok" if os.path.exists(edges_path) else "warn",
                ("◆ Lines captured" if os.path.exists(edges_path)
                 else "◆ No lines captured this week"))
-        + pill("ok", "◆ Projections calibrated on the mean")
         + "</div>", unsafe_allow_html=True)
 
+    day_header(slate, days, day)
+
     t1, t2, t3, t4 = st.tabs(
-        ["This Week", "vs The Book", "Track Record", "Model Health"])
+        ["🎯 Betting Board", "📋 All Projections", "📈 Track Record",
+         "🩺 Model Health"])
     with t1:
-        if df is None or df.empty:
-            st.warning("Empty slate.")
-        else:
-            view_week(path, df)
+        view_board(slate, season, week, day, day_name)
     with t2:
-        view_market(path)
+        view_projections(slate, season, week, day, day_name)
     with t3:
         view_record()
     with t4:
