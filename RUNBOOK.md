@@ -18,6 +18,34 @@ many times as you like.
 
 Add `streamlit run dashboard.py` whenever you want to look at it.
 
+### If you view the dashboard on Streamlit Community Cloud
+
+**The cloud app serves your GitHub repo, not this folder.** Running
+`run_slate.py` writes to your disk; the cloud app cannot see any of it
+until it is committed and pushed. So the weekly routine gains one step:
+
+```powershell
+python run_slate.py
+git add slates cache/edges_*.parquet cache/market_log.parquet
+git commit -m "week N slate + captured lines"
+git push
+```
+
+The app rebuilds on push, usually within a minute.
+
+`.gitignore` keeps the derived caches out (pbp is ~13MB a season and
+rebuilds itself from nflverse) but **tracks the three files that are
+evidence rather than cache**: `market_log.parquet`, `edges_*.parquet`, and
+`scoring_log.parquet`. Captured odds are a snapshot of a price at a moment
+— re-pull them days later and you get a different number, or nothing — so
+they cannot be regenerated and must live in the repo. Those three add
+~120KB.
+
+This bit once already: `cache/*.parquet` swept the evidence up by where it
+lived rather than what it was, so the cloud app loaded the slate fine and
+then reported "no posted lines, run run_slate.py" with the lines sitting
+un-pushed on disk.
+
 ### Once a week, not once a day
 
 Wednesday is the run. Props post midweek, that week's injury report is out,

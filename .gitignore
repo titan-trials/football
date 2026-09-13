@@ -25,6 +25,22 @@ cache/*.parquet
 cache/*.csv
 !cache/.gitkeep
 
+# EXCEPT THE EVIDENCE, WHICH HAPPENS TO LIVE IN cache/ TOO.
+#
+# These three are not derived and cannot be rebuilt: captured odds are a
+# snapshot of a price at a moment, and a re-pull days later returns a
+# different number or nothing at all. The blanket `cache/*.parquet` above
+# swept them up by WHERE THEY LIVE rather than WHAT THEY ARE, and the
+# consequence only showed up on Streamlit Community Cloud -- which serves
+# the GitHub repo, not the local folder. Slates are tracked, so the app
+# loaded a week and its games correctly and then reported "no posted lines,
+# run run_slate.py" with the lines sitting un-pushed on disk.
+#
+# Small and append-only: ~30KB per week of edges, 75KB of scoring log.
+!cache/market_log.parquet
+!cache/edges_*.parquet
+!cache/scoring_log.parquet
+
 # --- Predictions and scoring logs -------------------------------------
 # These ARE the evidence and they are append-only, so they are tracked
 # deliberately -- with one exception below. If a weekly slate file ever

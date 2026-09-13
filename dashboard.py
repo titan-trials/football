@@ -107,6 +107,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SLATE_DIR = os.path.join(BASE_DIR, "slates")
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 
+# Streamlit Community Cloud checks out the repo under /mount/src. Worth
+# knowing, because up there the app can only ever see what is COMMITTED --
+# a file written locally five minutes ago does not exist to it.
+CLOUD = BASE_DIR.startswith("/mount/src")
+
 PROP_LABEL = {
     "receiving_yards": "Receiving Yards",
     "receptions": "Receptions",
@@ -443,6 +448,13 @@ def view_board(slate: pd.DataFrame, season: int, week: int, day, day_name: str):
             if m:
                 have.append(f"{m.group(1)} week {m.group(2)}")
         st.warning(f"**No posted lines for {season} week {week}.**", icon="⚠️")
+        if CLOUD:
+            st.error(
+                "This app serves the **GitHub repo**, not your computer. If "
+                "you ran `run_slate.py` locally, the lines it bought are on "
+                "your disk and not in the repo yet — commit and push "
+                "`cache/edges_*.parquet` and the app will pick them up on "
+                "its next rebuild.", icon="☁️")
         if have:
             st.info(
                 "Lines **are** captured for " + ", ".join(sorted(have)) +
@@ -1317,10 +1329,17 @@ def main():
                 f"slates/ → **{n_sl}** slate file{'s' if n_sl != 1 else ''}  \n"
                 f"cache/ → **{n_ed}** edges file{'s' if n_ed != 1 else ''}, "
                 f"scoring log {'found' if ok_log else '**missing**'}")
+            if CLOUD:
+                st.info(
+                    "Running on **Streamlit Community Cloud**, which serves "
+                    "the GitHub repo — not your local folder. Anything you "
+                    "have not committed and pushed is invisible here, "
+                    "however recently you ran it.", icon="☁️")
             if n_sl and not n_ed:
                 st.caption(
                     "Slates but no edges means the capture step has not run "
-                    "for any week, or it ran and bought nothing.")
+                    "for any week — or, on the cloud, that the edges files "
+                    "were never pushed.")
 
         # A slate for a week whose games are still days away, built before
         # its props would even have posted, is a leftover -- usually from an
