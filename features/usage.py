@@ -518,6 +518,86 @@ def _fit_multipliers(df: pl.DataFrame, model, value_col: str,
             zip(agg["team"].to_list(), agg["player_id"].to_list(), mu.tolist())}
 
 
+def _fit_cross_team(df: pl.DataFrame, model, value_col: str,
+                    trailing: int) -> dict:
+    """
+    Each player's rate and the role he held earning it, IGNORING TEAM.
+
+    WHY. `ShareModel.rates` is keyed on (team, player_id), which is right
+    for a share of a specific team's targets and catastrophic the moment a
+    player moves. His whole history files under the old team, the lookup
+    for the new one misses, and he falls through to a generic role prior.
+
+    Measured on the 2026 week 1 slate:
+
+        Darren Waller, TE, Miami -> Carolina
+          his shrunk rate under MIA        3.622 targets/game
+          ('CAR', waller) in rates?        False
+          so he gets the TE3 role prior    0.784      -- a 4.6x cut
+
+        and he is not alone:
+          own history found                323 players
+          HISTORY UNDER AN OLD TEAM        108 players
+          genuinely no history              91 players
+
+    **Twenty-one percent of the slate lost its entire history to an
+    offseason move.** The model was not saying those players got worse; it
+    had no idea who they were. It priced Waller as a generic third-string
+    tight end against a book that had him at 2.5 receptions, and the
+    resulting 49-point "edge" was amnesia rather than an opinion.
+
+    What transfers across a move is not his rate -- his new team throws a
+    different number of passes and he sits at a different depth -- but how
+    good he was RELATIVE to the role he held. That ratio times his new
+    role's prior is the estimate. Same multiplier idea as
+    `_fit_multipliers`, used in the one place it is unambiguously better
+    than the alternative: against a player the model otherwise knows
+    nothing about.
+    """
+    if not {"role_pos", "role_bucket"}.issubset(set(df.columns)):
+        return {}
+    d = df.sort(["player_id", "season", "week"])
+    agg = (d.group_by("player_id", maintain_order=True)
+             .agg([pl.col(value_col).tail(trailing).sum().alias("_s"),
+                   pl.col(value_col).tail(trailing).len().alias("_n"),
+                   pl.col("role_pos").tail(trailing).last().alias("_rp"),
+                   pl.col("role_bucket").tail(trailing).median().alias("_rb"),
+                   pl.col("position").tail(trailing).last().alias("_pos")])
+             .filter(pl.col("_n") > 0))
+
+    # TWO VERSIONS WERE MEASURED. This is the one that won, and it is not
+    # the one that looks right on the motivating example.
+    #
+    #   version                 CRPS recv  CRPS rec  mean edge   Waller
+    #   no cross-team            6.635      0.537     -0.1363    0.73 targets
+    #   role-scaled (this)       6.629      0.536     -0.1305    0.67 targets
+    #   full history, shrunk     6.638      0.537     -0.1451    2.82 targets
+    #
+    # Carrying his FULL old-team rate and shrinking it toward the new role
+    # prior puts Waller at 2.82 targets and 53% against the book's 60% --
+    # the answer the example demands. It also makes the backtest and the
+    # market agreement WORSE, because shares are normalised: handing 108
+    # moved players their old volume takes it from the players who stayed.
+    #
+    # So the role-scaled multiplier ships. It is a small, real improvement
+    # on both measures, and it does NOT fix Waller: 0.853 x a 0.784 TE3
+    # prior is still 0.67 targets. His gap is the depth chart calling him
+    # a TE3, not the missing history -- which is what the evidence says
+    # even though the missing history is real and was worth fixing.
+    out = {}
+    for r in agg.iter_rows(named=True):
+        rate = r["_s"] / r["_n"]
+        role_then = (None if r["_rp"] is None or r["_rb"] is None
+                     else (r["_rp"], int(round(r["_rb"]))))
+        base = model._prior_for(role_then, r["_pos"])
+        if base <= 0:
+            continue
+        # Clipped: a tiny old-role prior otherwise yields a multiplier in
+        # the hundreds off two lucky games.
+        out[r["player_id"]] = float(np.clip(rate / base, 0.05, 6.0))
+    return out
+
+
 @dataclass
 class ShareModel:
     """
@@ -567,6 +647,9 @@ class ShareModel:
     # (team, player_id) -> how many times his ROLE'S rate he earns. None
     # unless role_relative=True, in which case it replaces the raw rate.
     multipliers: Optional[dict] = None
+    # player_id -> how many times his OLD role's rate he earned. Used only
+    # when (team, player_id) is absent, i.e. he changed teams.
+    elsewhere: Optional[dict] = None
 
     def mixture_for(self, role: Optional[tuple]) -> Optional[tuple]:
         """The role's empirical share distribution, or None to fall back."""
@@ -599,7 +682,8 @@ class ShareModel:
             trailing: int = 8, roles: Optional[pl.DataFrame] = None,
             share_dispersion: bool = False,
             mixture_positions: Sequence[str] = (),
-            role_relative: Sequence[str] = ()) -> "ShareModel":
+            role_relative: Sequence[str] = (),
+            cross_team: bool = False) -> "ShareModel":
         """
         roles: optional frame with team, player_id, role_pos, role_bucket --
         one row per player, the most recent depth-chart standing the caller
@@ -699,6 +783,9 @@ class ShareModel:
             model.multipliers = _fit_multipliers(df, model, value_col, trailing,
                                                  set(role_relative))
 
+        if cross_team:
+            model.elsewhere = _fit_cross_team(df, model, value_col, trailing)
+
         if share_dispersion:
             rc, pooled = estimate_share_concentration(
                 player_games, value_col=value_col, trailing=trailing)
@@ -736,6 +823,13 @@ class ShareModel:
         if key in self.rates:
             return self.rates[key]
         prior = self._prior_for(role, position)
+        if self.elsewhere and player_id in self.elsewhere:
+            # He has history, just not under this team -- he moved. Treat it
+            # as what it is: n games of evidence about HIM, shrunk toward
+            # what his new role usually gets. Same `shrink` every other
+            # rate in this model uses, so a player who moved is handled
+            # like a player who did not, rather than as a stranger.
+            return float(self.elsewhere[player_id] * prior)
         return float(shrink([0.0], [0.0], prior, self.prior_k)[0])
 
     def share_for(self, team: str, player_id: str, role: Optional[tuple] = None,

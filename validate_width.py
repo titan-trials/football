@@ -77,8 +77,8 @@ from features.props import (
 )
 from features.usage import ShareModel, TeamVolumeModel, opportunity_pmf
 from compare_props import served_rows
-from model_flags import (ROLE_RELATIVE_POSITIONS, SHARE_DISPERSION,
-                         SHARE_MIXTURE_POSITIONS)
+from model_flags import (CROSS_TEAM_HISTORY, ROLE_RELATIVE_POSITIONS,
+                         SHARE_DISPERSION, SHARE_MIXTURE_POSITIONS)
 
 
 def moments(pmf: np.ndarray, support: np.ndarray) -> tuple[float, float]:

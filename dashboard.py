@@ -293,6 +293,39 @@ def load_parquet(path: str):
     return pl.read_parquet(path).to_pandas()
 
 
+def probe(path: str) -> dict:
+    """
+    What is actually true about this file, uncached.
+
+    EXISTS BECAUSE THREE ROUNDS OF GUESSING PRECEDED IT. An empty page was
+    diagnosed as a wrong week, then a working directory, then an unpushed
+    file -- each plausible, each a guess, and the page never once said what
+    it had looked at and what it found. A loader that returns None for
+    "missing", "unreadable" and "empty" alike cannot be debugged from the
+    outside.
+    """
+    out = {"path": path, "exists": os.path.exists(path), "bytes": None,
+           "rows": None, "error": None}
+    if not out["exists"]:
+        return out
+    try:
+        out["bytes"] = os.path.getsize(path)
+        out["rows"] = pl.read_parquet(path).height
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+def probe_report(p: dict) -> str:
+    if not p["exists"]:
+        return f"`{os.path.basename(p['path'])}` — **not found**"
+    if p["error"]:
+        return (f"`{os.path.basename(p['path'])}` — {p['bytes']:,} bytes, "
+                f"**unreadable**: {p['error']}")
+    return (f"`{os.path.basename(p['path'])}` — {p['bytes']:,} bytes, "
+            f"**{p['rows']:,} rows**")
+
+
 def season_week(path: str):
     m = re.search(r"slate_(\d+)_wk(\d+)\.parquet$", path)
     return (int(m.group(1)), int(m.group(2))) if m else (None, None)
@@ -422,7 +455,8 @@ def game_label(df: pd.DataFrame) -> pd.Series:
 # 1. THE BOARD -- what you can actually bet on
 # ---------------------------------------------------------------------
 
-def view_board(slate: pd.DataFrame, season: int, week: int, day, day_name: str):
+def view_board(slate: pd.DataFrame, season: int, week: int, day, day_name: str,
+               picked_games: list = ()):
     """
     Only rows with a POSTED LINE. This is the page that answers "I want to
     bet on Sunday, who do I look at".
@@ -442,31 +476,60 @@ def view_board(slate: pd.DataFrame, season: int, week: int, day, day_name: str):
         # just said "run run_slate.py", which is useless when the real
         # problem is that you are looking at the wrong week -- exactly what
         # happened when a stale week-2 slate became the default.
-        have = []
-        for f in glob.glob(os.path.join(CACHE_DIR, "edges_*.parquet")):
-            m = re.search(r"edges_(\d+)_wk(\d+)\.parquet$", f)
-            if m:
-                have.append(f"{m.group(1)} week {m.group(2)}")
         st.warning(f"**No posted lines for {season} week {week}.**", icon="⚠️")
-        if CLOUD:
+
+        me = probe(edges_file)
+        # OTHER weeks only. Listing the week you are already on as somewhere
+        # else to look is how this page ended up contradicting itself.
+        others = []
+        for f in sorted(glob.glob(os.path.join(CACHE_DIR, "edges_*.parquet"))):
+            m = re.search(r"edges_(\d+)_wk(\d+)\.parquet$", f)
+            if m and not (int(m.group(1)) == season and int(m.group(2)) == week):
+                others.append(f"{m.group(1)} week {m.group(2)}")
+
+        if me["exists"] and (me["error"] or not me["rows"]):
+            # The file is right there and unusable. That is a different
+            # problem from a missing file and gets a different answer.
             st.error(
-                "This app serves the **GitHub repo**, not your computer. If "
-                "you ran `run_slate.py` locally, the lines it bought are on "
-                "your disk and not in the repo yet — commit and push "
-                "`cache/edges_*.parquet` and the app will pick them up on "
-                "its next rebuild.", icon="☁️")
-        if have:
-            st.info(
-                "Lines **are** captured for " + ", ".join(sorted(have)) +
-                ".\n\nIf that is the week you meant, switch weeks in the "
-                "sidebar on the left — this page follows whichever week is "
-                "selected there.")
-        else:
-            st.info(
-                "Run `python run_slate.py` — it buys the week's lines, "
-                "rebuilds the slate and fills this page. Props post around "
-                "the Wednesday before a week's games; before that the books "
-                "return nothing, which is not an error.")
+                f"The file for this week **is present but has no usable "
+                f"rows** — so this is not a missing-file problem.\n\n"
+                f"{probe_report(me)}", icon="🔎")
+            if me["bytes"] and me["bytes"] < 2000:
+                st.caption(
+                    "A parquet that small is usually a **Git LFS pointer** "
+                    "rather than the data. If the repo has LFS enabled for "
+                    "`*.parquet`, Streamlit Cloud checks out the pointer "
+                    "text, not the file.")
+        elif not me["exists"]:
+            if CLOUD:
+                st.error(
+                    "This app serves the **GitHub repo**, not your computer. "
+                    "The lines `run_slate.py` bought are on your disk and not "
+                    "in the repo — commit and push `cache/edges_*.parquet`.",
+                    icon="☁️")
+            else:
+                st.info(
+                    "Run `python run_slate.py` — it buys the week's lines, "
+                    "rebuilds the slate and fills this page. Props post "
+                    "around the Wednesday before a week's games; before that "
+                    "the books return nothing, which is not an error.")
+
+        if others:
+            st.info("Other weeks with captured lines: " + ", ".join(others) +
+                    " — switch weeks in the sidebar.")
+
+        with st.expander("What exactly did it look at?", expanded=True):
+            st.caption(f"Reading from `{CACHE_DIR}`"
+                       + ("  ·  **Streamlit Cloud (GitHub repo)**" if CLOUD
+                          else ""))
+            st.markdown(probe_report(me))
+            st.markdown(probe_report(
+                probe(os.path.join(CACHE_DIR, "market_log.parquet"))))
+            st.markdown(probe_report(
+                probe(os.path.join(CACHE_DIR, "scoring_log.parquet"))))
+            if st.button("Reload data (clear cache)"):
+                st.cache_data.clear()
+                st.rerun()
         return
 
     e = edges.copy()
@@ -486,13 +549,24 @@ def view_board(slate: pd.DataFrame, season: int, week: int, day, day_name: str):
     else:
         e["game"] = ""
 
+    # APPLY THE GAME SELECTION HERE, BEFORE THE SUMMARY CARDS. Filtering
+    # only the table left the cards reporting the whole day -- clicking a
+    # game changed the rows underneath and still said "546 bettable props",
+    # which reads as the click having done nothing.
+    if picked_games:
+        e = e[e["game"].isin(list(picked_games))]
+        if e.empty:
+            st.info(f"No posted lines for {', '.join(picked_games)}.")
+            return
+
     e["side"] = np.where(e["edge"] >= 0, "OVER", "UNDER")
     e["gap"] = e["edge"].abs()
     e["kick"] = e["et"].dt.strftime("%a %-I:%M %p ET")
 
     big = int((e["gap"] >= 0.10).sum())
     cards([
-        ("Bettable props", f"{len(e):,}", f"{day_name}"),
+        ("Bettable props", f"{len(e):,}",
+         ", ".join(picked_games) if picked_games else day_name),
         ("Players priced", f"{e['player_id'].nunique()}",
          f"across {e['game'].nunique()} games"),
         ("We disagree ≥10 pts", f"{big}",
@@ -510,19 +584,16 @@ def view_board(slate: pd.DataFrame, season: int, week: int, day, day_name: str):
         "has no demonstrated edge over a closing line yet."
         "</div>", unsafe_allow_html=True)
 
-    f1, f2, f3 = st.columns([3, 2, 2])
-    games = sorted(g for g in e["game"].unique() if g)
-    pick_games = f1.multiselect("Game", games, placeholder="All games")
+    # The game filter lives in the chips at the top of the page, not here.
+    f1, f2 = st.columns([2, 2])
     props = sorted(e["prop"].unique())
-    pick_prop = f2.multiselect("Prop", props, format_func=fmt,
+    pick_prop = f1.multiselect("Prop", props, format_func=fmt,
                                placeholder="All props")
-    min_books = f3.slider("Minimum books quoting", 1, 5, 2,
+    min_books = f2.slider("Minimum books quoting", 1, 5, 2,
                           help="A single-book line is much weaker evidence "
                                "than a five-book consensus.")
 
     v = e[e["n_books"] >= min_books]
-    if pick_games:
-        v = v[v["game"].isin(pick_games)]
     if pick_prop:
         v = v[v["prop"].isin(pick_prop)]
     if v.empty:
@@ -581,8 +652,11 @@ def view_board(slate: pd.DataFrame, season: int, week: int, day, day_name: str):
 # ---------------------------------------------------------------------
 
 def view_projections(slate: pd.DataFrame, season: int, week: int, day,
-                     day_name: str):
+                     day_name: str, picked_games: list = ()):
     df = filter_to_day(slate, day)
+    if picked_games and "game_id" in df.columns:
+        df = df.assign(_g=game_label(df))
+        df = df[df["_g"].isin(list(picked_games))].drop(columns=["_g"])
     if df.empty:
         st.info(f"No projections for {day_name}.")
         return
@@ -694,15 +768,25 @@ def view_projections(slate: pd.DataFrame, season: int, week: int, day,
 # The day strip
 # ---------------------------------------------------------------------
 
-def day_header(slate: pd.DataFrame, days: pd.DataFrame, day):
-    """The chosen day's games, with kickoff times and whether they are done."""
+def day_header(slate: pd.DataFrame, days: pd.DataFrame, day) -> list:
+    """
+    The chosen day's games as CLICKABLE chips, returning the selection.
+
+    These used to be decoration -- an HTML strip that told you ATL @ PIT
+    kicked off at 1pm and gave you no way to act on it, so narrowing to one
+    game meant hunting for a separate dropdown further down the page. The
+    chips ARE the filter now, and the filter is shared by the board and the
+    projections, so picking a game once narrows everything.
+
+    Returns the selected `AWAY @ HOME` labels, empty for "all games".
+    """
     if "kickoff" not in slate.columns or day is None:
-        return
+        return []
     k = slate.dropna(subset=["kickoff"]).copy()
     k["et"] = to_et(k["kickoff"])
     k = k[k["et"].dt.date == day]
     if k.empty:
-        return
+        return []
     now_et = pd.Timestamp.now(tz="UTC").tz_convert(ET)
 
     g = (k.groupby("game_id")
@@ -712,25 +796,34 @@ def day_header(slate: pd.DataFrame, days: pd.DataFrame, day):
     g["mins"] = (now_et - g["et"]).dt.total_seconds() / 60.0
     g["status"] = np.where(g["mins"] > 210, "Final",
                   np.where(g["mins"] >= 0, "Playing now", "Upcoming"))
-    g["when"] = g["et"].dt.strftime("%-I:%M %p ET")
+    g["when"] = g["et"].dt.strftime("%-I:%M")
     g = g.sort_values("et")
 
     ICON = {"Final": "✓", "Playing now": "●", "Upcoming": "○"}
-    chips = "".join(
-        f'<span class="game">{ICON[r["status"]]} <b>{r["game"]}</b> '
-        f'<span class="t">{r["when"]}</span></span>'
-        for r in g.to_dict("records"))
-    st.markdown(f'<div class="games">{chips}</div>', unsafe_allow_html=True)
+    labels = {r["game"]: f"{ICON[r['status']]} {r['game']}  {r['when']}"
+              for r in g.to_dict("records")}
+
+    picked = st.pills(
+        "Games", list(labels), selection_mode="multi",
+        format_func=lambda x: labels[x], key=f"games_{day}",
+        label_visibility="collapsed",
+        help="Click a game to narrow the board and the projections to it. "
+             "Click again to clear.")
+    picked = picked or []
 
     upcoming = g[g["status"] == "Upcoming"]
-    if not upcoming.empty:
+    bits = []
+    if picked:
+        bits.append(f"Showing **{', '.join(picked)}** — click again to clear")
+    elif not upcoming.empty:
         nxt = upcoming.iloc[0]
-        hrs = -nxt["mins"] / 60.0
-        st.caption(f"Next kickoff: **{nxt['game']}** in {hrs:.0f} hours "
-                   f"({nxt['when']}).  ✓ final · ● playing now · ○ upcoming")
+        bits.append(f"Next kickoff **{nxt['game']}** in "
+                    f"{-nxt['mins'] / 60.0:.0f}h")
     else:
-        st.caption("Every game on this day has kicked off.  "
-                   "✓ final · ● playing now · ○ upcoming")
+        bits.append("Every game on this day has kicked off")
+    bits.append("✓ final · ● playing now · ○ upcoming · times ET")
+    st.caption("  ·  ".join(bits))
+    return picked
 
 
 def view_record():
@@ -1395,15 +1488,15 @@ def main():
                 else "◆ No lines captured this week"))
         + "</div>", unsafe_allow_html=True)
 
-    day_header(slate, days, day)
+    picked = day_header(slate, days, day)
 
     t1, t2, t3, t4 = st.tabs(
         ["🎯 Betting Board", "📋 All Projections", "📈 Track Record",
          "🩺 Model Health"])
     with t1:
-        view_board(slate, season, week, day, day_name)
+        view_board(slate, season, week, day, day_name, picked)
     with t2:
-        view_projections(slate, season, week, day, day_name)
+        view_projections(slate, season, week, day, day_name, picked)
     with t3:
         view_record()
     with t4:

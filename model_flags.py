@@ -281,3 +281,58 @@ SHARE_MIXTURE_POSITIONS = ("QB",)
 # The next hypothesis has to be about the depth chart itself rather than
 # about how its history is used.
 ROLE_RELATIVE_POSITIONS = ("QB",)
+
+# ---------------------------------------------------------------------
+# CROSS_TEAM_HISTORY
+#
+# When a player's (team, player_id) key is missing but he has history
+# under a DIFFERENT team, carry it across: his rate relative to the role he
+# held then, applied to the role he holds now. Without it he falls through
+# to a generic role prior as though he had never played.
+#
+# MEASURED ON THE 2026 WEEK 1 SLATE:
+#
+#     Darren Waller, TE, Miami -> Carolina
+#       his shrunk rate under MIA      3.622 targets/game
+#       ('CAR', waller) in rates?      False
+#       so he gets the TE3 prior       0.784        a 4.6x cut
+#       model P(over 1.5 receptions)   11%  against the book's 60%
+#       his actual 2025 average        4.4 targets, 3.2 receptions
+#
+#     own history found              323 players
+#     HISTORY UNDER AN OLD TEAM      108 players   (21% of the slate)
+#     genuinely no history            91 players
+#
+# The model was not saying those 108 players got worse. It had no idea who
+# they were, and priced them as generic depth pieces. That is most of why
+# the week 1 board was wall-to-wall UNDER at 35-49 point gaps against the
+# market -- amnesia, not an opinion.
+#
+# WHERE IT CAN AND CANNOT BE MEASURED. The bug bites in the weeks right
+# after roster turnover and fades as players accumulate games with their
+# new team, so a backtest scoring weeks 5+ barely sees it. Validate on
+# EARLY weeks: `compare_props.py --min-week 1`.
+#
+# MEASURED, 2025 weeks 1-18, served population:
+#
+#   version                 CRPS recv  CRPS rec  wk1 mean edge   Waller
+#   off                       6.635      0.537      -0.1363      0.73 targets
+#   role-scaled (shipped)     6.629      0.536      -0.1305      0.67 targets
+#   full history, shrunk      6.638      0.537      -0.1451      2.82 targets
+#
+# AND IT DOES NOT FIX THE EXAMPLE THAT MOTIVATED IT. Waller's own rate
+# scaled by his old TE1 role is a 0.853 multiplier; times Carolina's 0.784
+# TE3 prior it is still 0.67 targets, and the model still prices his over
+# 1.5 receptions at 10% against the book's 60%.
+#
+# Carrying his FULL old rate instead puts him at 2.82 targets and 53%,
+# which is the answer the example demands -- and makes both the backtest
+# and the market agreement worse, because shares are normalised: handing
+# 108 moved players their old volume takes it from the players who stayed.
+#
+# So the honest reading is that two separate things were wrong and only one
+# of them is this flag. The lost history was real and is now fixed. Waller's
+# 49-point gap is the DEPTH CHART calling him a TE3 -- the same binding
+# constraint the deep-bucket attempt hit a day earlier. Fixing that needs a
+# better read on role than a depth chart provides, not a better estimator.
+CROSS_TEAM_HISTORY = True

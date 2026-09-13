@@ -55,8 +55,8 @@ from features.props import (
     player_games, roster_player_games, shape_per_game, team_games,
 )
 from features.usage import ShareModel, TeamVolumeModel, opportunity_pmf
-from model_flags import (ROLE_RELATIVE_POSITIONS, SHARE_DISPERSION,
-                         SHARE_MIXTURE_POSITIONS)
+from model_flags import (CROSS_TEAM_HISTORY, ROLE_RELATIVE_POSITIONS,
+                         SHARE_DISPERSION, SHARE_MIXTURE_POSITIONS)
 
 SLATE_DIR = "slates"
 
@@ -183,7 +183,8 @@ def predict_prop(spec, pbp, ps, rr, season, week, trailing, prior_seasons, roste
     shr = ShareModel.fit(past_pg, trailing=trailing, roles=cur,
                          share_dispersion=SHARE_DISPERSION,
                          mixture_positions=SHARE_MIXTURE_POSITIONS,
-                         role_relative=ROLE_RELATIVE_POSITIONS)
+                         role_relative=ROLE_RELATIVE_POSITIONS,
+                         cross_team=CROSS_TEAM_HISTORY)
 
     if spec.has_shape:
         per_opp = PerOpportunityModel.fit(
