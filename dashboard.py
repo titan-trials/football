@@ -95,7 +95,17 @@ POS_DOT = {"QB": "🔵", "RB": "🟠", "WR": "🟢", "TE": "🟣", "FB": "🟡"}
 def position_tag(pos: str) -> str:
     return f"{POS_DOT.get(pos, '⚪')} {pos}" if isinstance(pos, str) else ""
 
-SLATE_DIR, CACHE_DIR = "slates", "cache"
+# ANCHORED TO THIS FILE, NOT TO THE WORKING DIRECTORY.
+#
+# `"slates"` and `"cache"` are relative paths, so they resolve against
+# wherever streamlit happened to be launched from. Launch it from anywhere
+# but the project root -- a shortcut, a parent folder, an IDE run button --
+# and the page loads, finds nothing, and reports "no posted lines, run
+# run_slate.py" while the files sit right there. A read-only dashboard
+# should not care what directory you were standing in.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SLATE_DIR = os.path.join(BASE_DIR, "slates")
+CACHE_DIR = os.path.join(BASE_DIR, "cache")
 
 PROP_LABEL = {
     "receiving_yards": "Receiving Yards",
@@ -1292,6 +1302,25 @@ def main():
             "An NFL week runs Thursday to Monday, so one week holds several "
             "game days. Weeks are ordered by **when the games are**, not by "
             "filename, and the one being played is selected by default.")
+
+        # SELF-DIAGNOSIS. "It says there is nothing there" is unanswerable
+        # without knowing which paths were checked and what was found, and
+        # that question has now come up twice.
+        with st.expander("Where is it reading from?"):
+            st.caption(f"**Project**  \n`{BASE_DIR}`")
+            st.caption(f"**Launched from**  \n`{os.getcwd()}`")
+            n_sl = len(glob.glob(os.path.join(SLATE_DIR, "slate_*.parquet")))
+            n_ed = len(glob.glob(os.path.join(CACHE_DIR, "edges_*.parquet")))
+            ok_log = os.path.exists(os.path.join(CACHE_DIR,
+                                                 "scoring_log.parquet"))
+            st.caption(
+                f"slates/ → **{n_sl}** slate file{'s' if n_sl != 1 else ''}  \n"
+                f"cache/ → **{n_ed}** edges file{'s' if n_ed != 1 else ''}, "
+                f"scoring log {'found' if ok_log else '**missing**'}")
+            if n_sl and not n_ed:
+                st.caption(
+                    "Slates but no edges means the capture step has not run "
+                    "for any week, or it ran and bought nothing.")
 
         # A slate for a week whose games are still days away, built before
         # its props would even have posted, is a leftover -- usually from an
