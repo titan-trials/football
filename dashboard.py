@@ -59,10 +59,41 @@ import streamlit as st
 st.set_page_config(page_title="Football Props", page_icon="🏈", layout="wide")
 
 # --- palette -----------------------------------------------------------
-C_MODEL, C_MARKET, C_CLIM = "#2a78d6", "#eb6834", "#1baf7a"
+#
+# TWO SELECTED PALETTES, NOT ONE FLIPPED. The dark column is the same three
+# hues re-stepped for a dark surface, each validated against that surface
+# rather than assumed to carry over. Both pass every gate of the dataviz
+# validator:
+#
+#   light (surface #fcfcfb)  worst adjacent CVD dE 9.2, normal-vision 27.6
+#   dark  (surface #1a1a19)  worst adjacent CVD dE 9.4, normal-vision 26.5,
+#                            and all three clear 3:1 contrast
+#
+# The light set was the only one that existed at first, hardcoded. On a
+# dark Streamlit theme that painted near-black text and axis labels onto a
+# near-black background -- invisible, which is what "it's all black and I
+# can't see anything" meant.
+PALETTES = {
+    "light": dict(
+        model="#2a78d6", market="#eb6834", clim="#1baf7a",
+        surface="#fcfcfb", ink="#1a1a18", ink2="#52514e", ink3="#8a8a85",
+        grid="#e8e7e3", panel="#f7f6f3",
+    ),
+    "dark": dict(
+        model="#3987e5", market="#d95926", clim="#199e70",
+        surface="#1a1a19", ink="#f3f2ee", ink2="#c3c2b7", ink3="#93928a",
+        grid="#383835", panel="#232321",
+    ),
+}
 GOOD, WARNING, SERIOUS, CRITICAL = "#0ca30c", "#fab219", "#ec835a", "#d03b3b"
-SURFACE, INK, INK_2, INK_3 = "#fcfcfb", "#0b0b0b", "#52514e", "#8a8a85"
-GRID = "#e8e7e3"
+
+# Position colours, so a table of names is not one undifferentiated block.
+# Always paired with the position's letters -- hue never carries it alone.
+POS_DOT = {"QB": "🔵", "RB": "🟠", "WR": "🟢", "TE": "🟣", "FB": "🟡"}
+
+
+def position_tag(pos: str) -> str:
+    return f"{POS_DOT.get(pos, '⚪')} {pos}" if isinstance(pos, str) else ""
 
 SLATE_DIR, CACHE_DIR = "slates", "cache"
 
@@ -79,49 +110,105 @@ PROP_UNIT = {
     "receptions": "rec", "receiving_tds": "TD", "rushing_tds": "TD",
 }
 
-CSS = f"""
+# Set by apply_theme() before anything renders. Every chart reads these at
+# CALL time, so swapping the palette swaps the whole page.
+C_MODEL = C_MARKET = C_CLIM = SURFACE = INK = INK_2 = INK_3 = GRID = PANEL = ""
+
+PILLS = {
+    "light": dict(ok_bg="#eaf7ea", ok_fg="#0a6b0a", ok_bd="#bfe4bf",
+                  warn_bg="#fdf3dc", warn_fg="#7a5600", warn_bd="#f0d99a",
+                  crit_bg="#fbe9e9", crit_fg="#8f2020", crit_bd="#f0bfbf",
+                  info_bg="#eaf1fb", info_fg="#1b4c8f", info_bd="#c3d8f4"),
+    # Dark: tinted backgrounds near the surface, text light enough to clear
+    # 4.5:1 on them. A light-mode pill dropped onto a dark page is a bright
+    # rectangle with dark text -- legible but shouting.
+    "dark": dict(ok_bg="#16301a", ok_fg="#8fd694", ok_bd="#275230",
+                 warn_bg="#332a12", warn_fg="#f0c265", warn_bd="#5c4a1d",
+                 crit_bg="#3a1d1d", crit_fg="#f09a9a", crit_bd="#5e2e2e",
+                 info_bg="#16273d", info_fg="#9cc4f5", info_bd="#27436b"),
+}
+
+
+def apply_theme() -> dict:
+    """Resolve the theme once and publish it to the module globals."""
+    global C_MODEL, C_MARKET, C_CLIM, SURFACE, INK, INK_2, INK_3, GRID, PANEL
+    name = resolve_theme()
+    P = dict(PALETTES[name])
+    P.update(PILLS[name])
+    P["name"] = name
+    C_MODEL, C_MARKET, C_CLIM = P["model"], P["market"], P["clim"]
+    SURFACE, INK, INK_2 = P["surface"], P["ink"], P["ink2"]
+    INK_3, GRID, PANEL = P["ink3"], P["grid"], P["panel"]
+    return P
+
+
+def resolve_theme() -> str:
+    """
+    Which palette to paint with: the user's explicit choice, else whatever
+    Streamlit is actually rendering in.
+
+    `st.context.theme["type"]` reports the LIVE theme, including when it
+    follows the operating system -- which a config file cannot tell you.
+    """
+    pick = st.session_state.get("theme_pick", "Match my system")
+    if pick == "Light":
+        return "light"
+    if pick == "Dark":
+        return "dark"
+    try:
+        return "dark" if st.context.theme.get("type") == "dark" else "light"
+    except Exception:  # noqa: BLE001
+        return "light"
+
+
+def css(P: dict) -> str:
+    return f"""
 <style>
   .block-container {{ padding-top: 2.2rem; max-width: 1400px; }}
   h1, h2, h3 {{ letter-spacing: -0.015em; }}
 
   .hdr {{ display:flex; align-items:baseline; gap:.75rem; flex-wrap:wrap;
          margin-bottom:.15rem; }}
-  .hdr h1 {{ margin:0; font-size:1.9rem; }}
-  .hdr .wk {{ font-size:.95rem; color:{INK_2}; }}
+  .hdr h1 {{ margin:0; font-size:1.9rem; color:{P['ink']}; }}
+  .hdr .wk {{ font-size:.95rem; color:{P['ink2']}; }}
 
   .strip {{ display:flex; gap:.5rem; flex-wrap:wrap; margin:.9rem 0 1.3rem; }}
   .pill {{ display:inline-flex; align-items:center; gap:.4rem;
           padding:.32rem .7rem; border-radius:999px; font-size:.8rem;
           font-weight:600; border:1px solid transparent; }}
-  .pill.ok   {{ background:#eaf7ea; color:#0a6b0a; border-color:#bfe4bf; }}
-  .pill.warn {{ background:#fdf3dc; color:#7a5600; border-color:#f0d99a; }}
-  .pill.crit {{ background:#fbe9e9; color:#8f2020; border-color:#f0bfbf; }}
-  .pill.info {{ background:#eaf1fb; color:#1b4c8f; border-color:#c3d8f4; }}
+  .pill.ok   {{ background:{P['ok_bg']};   color:{P['ok_fg']};
+               border-color:{P['ok_bd']}; }}
+  .pill.warn {{ background:{P['warn_bg']}; color:{P['warn_fg']};
+               border-color:{P['warn_bd']}; }}
+  .pill.crit {{ background:{P['crit_bg']}; color:{P['crit_fg']};
+               border-color:{P['crit_bd']}; }}
+  .pill.info {{ background:{P['info_bg']}; color:{P['info_fg']};
+               border-color:{P['info_bd']}; }}
 
   .cards {{ display:grid; gap:.75rem;
            grid-template-columns:repeat(auto-fit,minmax(165px,1fr));
            margin-bottom:1.1rem; }}
-  .card {{ background:{SURFACE}; border:1px solid {GRID}; border-radius:12px;
-          padding:.8rem .95rem; }}
+  .card {{ background:{P['surface']}; border:1px solid {P['grid']};
+          border-radius:12px; padding:.8rem .95rem; }}
   .card .k {{ font-size:.72rem; text-transform:uppercase; letter-spacing:.06em;
-             color:{INK_3}; font-weight:700; }}
-  .card .v {{ font-size:1.55rem; font-weight:700; color:{INK}; line-height:1.25;
-             font-variant-numeric:tabular-nums; }}
-  .card .s {{ font-size:.76rem; color:{INK_2}; }}
+             color:{P['ink3']}; font-weight:700; }}
+  .card .v {{ font-size:1.55rem; font-weight:700; color:{P['model']};
+             line-height:1.25; font-variant-numeric:tabular-nums; }}
+  .card .s {{ font-size:.76rem; color:{P['ink2']}; }}
 
-  .lede {{ background:#f7f6f3; border-left:3px solid {C_MODEL};
+  .lede {{ background:{P['panel']}; border-left:3px solid {P['model']};
           padding:.7rem .95rem; border-radius:0 8px 8px 0; font-size:.9rem;
-          color:{INK_2}; margin-bottom:1rem; }}
-  .lede b {{ color:{INK}; }}
+          color:{P['ink2']}; margin-bottom:1rem; }}
+  .lede b {{ color:{P['ink']}; }}
 
   .games {{ display:flex; gap:.45rem; flex-wrap:wrap; margin:.2rem 0 .4rem; }}
   .game {{ display:inline-flex; align-items:center; gap:.35rem;
-          background:{SURFACE}; border:1px solid {GRID}; border-radius:8px;
-          padding:.28rem .55rem; font-size:.8rem; color:{INK_2}; }}
-  .game b {{ color:{INK}; font-weight:600; }}
-  .game .t {{ color:{INK_3}; font-variant-numeric:tabular-nums; }}
+          background:{P['surface']}; border:1px solid {P['grid']};
+          border-radius:8px; padding:.28rem .55rem; font-size:.8rem;
+          color:{P['ink2']}; }}
+  .game b {{ color:{P['ink']}; font-weight:600; }}
+  .game .t {{ color:{P['ink3']}; font-variant-numeric:tabular-nums; }}
 
-  .rowlab {{ font-variant-numeric:tabular-nums; }}
   code {{ font-size:.85em; }}
   [data-testid="stMetricValue"] {{ font-size:1.4rem; }}
 </style>
@@ -133,6 +220,55 @@ CSS = f"""
 @st.cache_data(ttl=300)
 def list_slates() -> list:
     return sorted(glob.glob(os.path.join(SLATE_DIR, "slate_*.parquet")), reverse=True)
+
+
+@st.cache_data(ttl=300)
+def slate_index() -> pd.DataFrame:
+    """
+    Every slate on disk with its season, week, and when its games kick off.
+
+    ORDERING BY FILENAME IS A BUG, AND IT BIT. `list_slates` sorts reverse
+    alphabetically, so a leftover `slate_2026_wk2.parquet` -- written on
+    2026-09-11 by the old `current_week() + 1` logic, for games ten days
+    away -- sorted ahead of week 1 and became the default. The dashboard
+    opened on a week with no captured lines and reported "no posted lines,
+    run run_slate.py" while week 1 sat right there, fully priced, one
+    dropdown click away.
+
+    A week is chosen by WHEN ITS GAMES ARE, which is the only thing that
+    makes "current" mean anything.
+    """
+    rows = []
+    for path in list_slates():
+        season, week = season_week(path)
+        if season is None:
+            continue
+        try:
+            k = pl.read_parquet(path, columns=["kickoff"])["kickoff"]
+            first, last = k.min(), k.max()
+        except Exception:  # noqa: BLE001
+            first = last = None
+        rows.append({"path": path, "season": season, "week": week,
+                     "first": first, "last": last,
+                     "built": os.path.getmtime(path)})
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).sort_values(["season", "week"]).reset_index(drop=True)
+    df["first"] = pd.to_datetime(df["first"])
+    df["last"] = pd.to_datetime(df["last"])
+    return df
+
+
+def default_slate(idx: pd.DataFrame) -> int:
+    """
+    The earliest week whose games have not all finished -- i.e. the one
+    being played or coming next. Falls back to the most recent.
+    """
+    if idx.empty:
+        return 0
+    now = pd.Timestamp.utcnow().tz_localize(None)
+    live = idx[idx["last"].notna() & (idx["last"] + pd.Timedelta(hours=3.5) > now)]
+    return int(live.index[0]) if not live.empty else int(idx.index[-1])
 
 
 @st.cache_data(ttl=300)
@@ -172,12 +308,20 @@ def brier_skill(y, p) -> float:
 # --- charts ------------------------------------------------------------
 
 def leaderboard_chart(df: pd.DataFrame, value: str, label: str,
-                      unit: str, color: str = C_MODEL, height: int = None):
+                      unit: str, color: str = None, height: int = None):
     """
     Horizontal bars: magnitude by identity, which is what a leaderboard is.
     Every bar is directly labelled, so identity and value never depend on
     reading a colour or chasing an axis.
+
+    `color=None` RATHER THAN `color=C_MODEL`. A default argument is bound
+    once, when the function is defined -- which happens before
+    `apply_theme()` has filled the palette in, so the default captured an
+    empty string and every bar on the projections chart rendered invisible.
+    The axis and the labels drew fine, which is what made it look like a
+    data problem rather than a colour one.
     """
+    color = color or C_MODEL
     df = df.copy()
     df["_lab"] = df[value].map(lambda v: f"{v:,.1f} {unit}" if unit != "TD"
                                else f"{v:.0%}")
@@ -276,13 +420,31 @@ def view_board(slate: pd.DataFrame, season: int, week: int, day, day_name: str):
     find the handful that matter. A projection for a player no book prices
     is a research output, not a betting one.
     """
-    edges = load_parquet(os.path.join(CACHE_DIR, f"edges_{season}_wk{week}.parquet"))
+    edges_file = os.path.join(CACHE_DIR, f"edges_{season}_wk{week}.parquet")
+    edges = load_parquet(edges_file)
     if edges is None or edges.empty:
-        st.info(
-            f"**No posted lines captured for week {week} yet.**\n\n"
-            f"Run `python run_slate.py` — it buys the week's lines, rebuilds "
-            f"the slate and fills this page. Props post around Wednesday; "
-            f"before that the books come back empty, which is not an error.")
+        # NAME THE WEEK AND SAY WHICH WEEKS DO HAVE LINES. The old message
+        # just said "run run_slate.py", which is useless when the real
+        # problem is that you are looking at the wrong week -- exactly what
+        # happened when a stale week-2 slate became the default.
+        have = []
+        for f in glob.glob(os.path.join(CACHE_DIR, "edges_*.parquet")):
+            m = re.search(r"edges_(\d+)_wk(\d+)\.parquet$", f)
+            if m:
+                have.append(f"{m.group(1)} week {m.group(2)}")
+        st.warning(f"**No posted lines for {season} week {week}.**", icon="⚠️")
+        if have:
+            st.info(
+                "Lines **are** captured for " + ", ".join(sorted(have)) +
+                ".\n\nIf that is the week you meant, switch weeks in the "
+                "sidebar on the left — this page follows whichever week is "
+                "selected there.")
+        else:
+            st.info(
+                "Run `python run_slate.py` — it buys the week's lines, "
+                "rebuilds the slate and fills this page. Props post around "
+                "the Wednesday before a week's games; before that the books "
+                "return nothing, which is not an error.")
         return
 
     e = edges.copy()
@@ -347,6 +509,8 @@ def view_board(slate: pd.DataFrame, season: int, week: int, day, day_name: str):
 
     v = v.sort_values("gap", ascending=False).copy()
     v["prop_label"] = v["prop"].map(fmt)
+    if "position" in v.columns:
+        v["pos"] = v["position"].map(position_tag)
     # PERCENTAGE POINTS, NOT FRACTIONS. Streamlit's ProgressColumn applies
     # the format string to the RAW value, so a 0-1 probability with
     # "%.0f%%" renders every row as "0%" -- which is what the first version
@@ -480,6 +644,8 @@ def view_projections(slate: pd.DataFrame, season: int, week: int, day,
     show = t.copy()
     show["prop"] = show["prop"].map(fmt)
     show["bet"] = np.where(show["player_id"].isin(priced), "✓", "")
+    if "position" in show.columns:
+        show["position"] = show["position"].map(position_tag)
     if "kickoff" in show.columns:
         show["kicks"] = to_et(show["kickoff"]).dt.strftime("%a %-I:%M %p")
     cols = [c for c in ["player_name", "team", "kicks", "position", "prop",
@@ -1084,7 +1250,8 @@ def view_health():
 # --- app ---------------------------------------------------------------
 
 def main():
-    st.markdown(CSS, unsafe_allow_html=True)
+    P = apply_theme()
+    st.markdown(css(P), unsafe_allow_html=True)
 
     slates = list_slates()
     if not slates:
@@ -1092,15 +1259,50 @@ def main():
         st.info("No slate yet. Run **`python run_slate.py`** to build one.")
         return
 
+    idx = slate_index()
+    now = pd.Timestamp.utcnow().tz_localize(None)
+
+    def week_label(i: int) -> str:
+        r = idx.loc[i]
+        when = ""
+        if pd.notna(r["first"]):
+            lo = to_et(pd.Series([r["first"]])).iloc[0]
+            hi = to_et(pd.Series([r["last"]])).iloc[0]
+            when = f" · {lo:%d %b}–{hi:%d %b}"
+        tag = ""
+        if pd.notna(r["last"]):
+            if r["last"] + pd.Timedelta(hours=3.5) < now:
+                tag = "  ✓ done"
+            elif pd.notna(r["first"]) and r["first"] < now:
+                tag = "  ● in progress"
+        return f"Week {r['week']}{when}{tag}"
+
     with st.sidebar:
+        st.radio("Appearance", ["Match my system", "Light", "Dark"],
+                 key="theme_pick", horizontal=False,
+                 help="Charts and text are re-coloured for the surface they "
+                      "sit on, not flipped.")
+        st.divider()
         st.markdown("### Week")
-        path = st.selectbox(
-            "Week", slates, label_visibility="collapsed",
-            format_func=lambda p: (lambda sw: f"{sw[0]} · Week {sw[1]}")(
-                season_week(p)))
+        choice = st.selectbox(
+            "Week", list(idx.index), label_visibility="collapsed",
+            index=default_slate(idx), format_func=week_label)
+        path = idx.loc[choice, "path"]
         st.caption(
             "An NFL week runs Thursday to Monday, so one week holds several "
-            "game days. Older weeks stay on disk exactly as committed.")
+            "game days. Weeks are ordered by **when the games are**, not by "
+            "filename, and the one being played is selected by default.")
+
+        # A slate for a week whose games are still days away, built before
+        # its props would even have posted, is a leftover -- usually from an
+        # aborted run. Say so rather than letting it look current.
+        r = idx.loc[choice]
+        if pd.notna(r["first"]) and r["first"] > now + pd.Timedelta(days=3):
+            st.warning(
+                f"Week {r['week']}'s first game is "
+                f"{(r['first'] - now).days} days away. Books post props "
+                f"around the Wednesday before, so this slate is early and "
+                f"will have no lines yet.", icon="⚠️")
 
     slate = load_parquet(path)
     season, week = season_week(path)
