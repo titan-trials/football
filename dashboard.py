@@ -540,59 +540,337 @@ def view_record():
                                    "never averaged per week.")
 
 
-def view_health():
-    st.subheader("What is known to be wrong right now")
+def _metric_primer():
+    """
+    The two ideas the whole scorecard rests on, each with a worked example.
+
+    This block exists because the first version of this page asserted
+    "variance ratio 0.87" and left the reader to work out what that meant.
+    A number nobody can interpret is decoration.
+    """
+    a, b = st.columns(2, gap="large")
+    with a:
+        st.markdown(
+            f"""
+##### 1 · Level — *is the average right?*
+
+```
+ratio  =  average projected  ÷  average actual
+```
+
+**Worked example.** Across 3,759 top-3 receivers the model projected
+**21.90** yards each. They actually averaged **21.97**.
+
+```
+21.90 ÷ 21.97  =  0.997
+```
+
+So the model is 0.3% low — about **0.07 yards per player**. A ratio of
+1.00 is perfect, 1.20 means projecting 20% too high, 0.80 means 20% too
+low.
+
+*This is the easy half, and it is the half that was already fine.*
+""")
+    with b:
+        st.markdown(
+            f"""
+##### 2 · Width — *is the uncertainty right?*
+
+```
+variance ratio  =  variance the model claimed
+                   ÷  how far off it actually was²
+```
+
+**Worked example.** The model says a receiver's yards have a spread of
+about **24** (variance 576). In reality its misses average about **25.8**
+(variance 662).
+
+```
+576 ÷ 662  =  0.87        √0.87 = 0.93
+```
+
+So the spread is **7% too narrow**. Below 1.00 means over-confident:
+the model thinks it knows more than it does.
+
+*This is the half that was badly broken and is now mostly fixed.*
+""")
+
     st.markdown(
         '<div class="lede">'
-        "Every number here was measured, not estimated. <b>CONTEXT.md</b> "
-        "carries the working for each one, including the versions that did not "
-        "survive contact with the data."
+        "<b>Why width gets its own row when the average is already right.</b> "
+        "A prop does not pay out on the average — it pays out on whether the "
+        "player goes over a line. Those are different questions about the same "
+        "distribution, and the second one is mostly about the spread."
         "</div>", unsafe_allow_html=True)
 
-    issues = pd.DataFrame([
-        {"Area": "Mean, players who get lines", "State": "good",
-         "Reading": "ratio 0.99–1.01",
-         "What it means": "Projections are right on average for the players a "
-                          "book actually prices."},
-        {"Area": "Distribution width, receivers", "State": "good",
-         "Reading": "variance ratio 0.87",
-         "What it means": "Slightly over-confident. Under-prices the far tail "
-                          "a little."},
-        {"Area": "Distribution width, QBs", "State": "good",
-         "Reading": "QB1 1.03, QB2 0.80",
-         "What it means": "Fixed by the empirical share mixture on 2026-09-12. "
-                          "Was 0.71 and 0.46."},
-        {"Area": "Deep depth-chart ranks", "State": "warning",
-         "Reading": "WR7 2.5×, RB4 2.5×",
-         "What it means": "Over-predicts reserves. Books do not price these "
-                          "players, so it costs correctness, not money."},
-        {"Area": "Beating the book", "State": "critical",
-         "Reading": "unmeasured",
-         "What it means": "One captured week. Needs ~12–15 scored weeks before "
-                          "the question can even be asked."},
-        {"Area": "Availability flag", "State": "warning",
-         "Reading": "logged, feeds nothing",
-         "What it means": "Deliberately inert until ~20 scored weeks say "
-                          "whether it earns a place."},
-    ])
-    # Rendered as markdown rather than a dataframe so the explanation column
-    # WRAPS. In a dataframe it truncated mid-sentence, which turns the one
-    # column that carries the meaning into decoration.
-    ICON = {"good": "🟢", "warning": "🟡", "critical": "🔴"}
-    md = ["| | Area | Reading | What it means |", "|---|---|---|---|"]
-    # by column NAME, not itertuples -- "What it means" has a space, so
-    # itertuples renames it to a positional _4 that silently shifts if a
-    # column is ever inserted before it.
-    for _, r in issues.iterrows():
-        md.append(f"| {ICON[r['State']]} | **{r['Area']}** | `{r['Reading']}` | "
-                  f"{r['What it means']} |")
-    st.markdown("\n".join(md))
-    st.caption(
-        "The icon and the wording both carry the state, so it never depends "
-        "on colour alone.")
+    st.markdown(
+        """
+Take a receiver the model projects at **60 yards**, with a line at **90**.
+
+| | spread | how many spreads away 90 is | P(over 90) |
+|---|---|---|---|
+| model thinks | 24.0 | (90 − 60) ÷ 24.0 = 1.25 | **10.6%** |
+| reality | 25.8 | (90 − 60) ÷ 25.8 = 1.16 | **12.2%** |
+
+Same projection of 60 yards. Same line. But a 7% narrower spread prices
+the over at 10.6% when it is worth 12.2% — and **every** over above the
+projection is priced low the same way. The level check passes cleanly the
+whole time, because the level is not what is wrong.
+""")
+
+
+ISSUES = [
+    {
+        "state": "good",
+        "area": "Level — players who get lines",
+        "reading": "ratio 0.99 – 1.01",
+        "short": "Projections are right on average for the players a book "
+                 "actually posts a line on.",
+        "detail": """
+**What is measured.** Average projected ÷ average actual, for players in
+the top three at their position on the depth chart — roughly the set a
+book prices. Measured on all of 2025, one week at a time, with the model
+only ever seeing earlier weeks.
+
+| prop | projected | actual | ratio |
+|---|---|---|---|
+| Receiving yards | 21.90 | 21.97 | 0.997 |
+| Receptions | 1.99 | 2.01 | 0.992 |
+| Rushing yards | 11.95 | 12.28 | 0.973 |
+| Passing yards | 81.06 | 80.20 | 1.011 |
+
+**Why it is sliced by depth-chart rank.** Two obvious alternatives are
+both mistakes this project already made. Slicing by the *prediction* hides
+the problem — if the model shrinks everything toward the middle, the bins
+move with it and every bin looks fine. Slicing by the *outcome* ("players
+who caught at least one pass") conditions on success and guarantees the
+model looks low. Depth-chart rank is known before kickoff, so it is a fair
+way to cut the data.
+
+**What good looks like.** 0.97 – 1.03. It is there.
+""",
+    },
+    {
+        "state": "good",
+        "area": "Width — receivers",
+        "reading": "variance ratio 0.87",
+        "short": "Slightly over-confident. Under-prices the far tail a little.",
+        "detail": """
+**What is measured.** The variance the model claims ÷ the variance of its
+actual misses. 1.00 is honest; below 1.00 means the model's distributions
+are too narrow.
+
+**Where it came from.** This was **0.57** before 2026-09-12 — the spread
+was 25% too small. The cause was structural: the model treated a player's
+share of his team's targets as a fixed number, so his only source of
+week-to-week variation was luck in how the ball happened to bounce. In
+reality the share itself moves — game plan, matchup, who else is playing.
+
+**The fix** was to let the share be a random quantity rather than a fixed
+one (a beta-binomial instead of a binomial, if you want the name). That
+took receivers from 0.57 to 0.87.
+
+**Is 0.87 a problem?** Mildly. It means the far tail — big games, the
+over on a high line — is priced a few percent low. It is on the list, but
+it is now smaller than the things above it.
+""",
+    },
+    {
+        "state": "good",
+        "area": "Width — quarterbacks",
+        "reading": "QB1 1.03 · QB2 0.80",
+        "short": "Fixed on 2026-09-12 by modelling a QB's share as "
+                 "'probability of starting'. Was 0.71 and 0.46.",
+        "detail": """
+**Why QBs were the worst case.** A quarterback's share of his team's pass
+attempts is not a normal-looking spread around an average. It is close to
+all-or-nothing:
+
+| | throws <10% | 10–80% | throws ≥80% |
+|---|---|---|---|
+| QB1 (starter) | 4.4% | 5.7% | **90.0%** |
+| QB2 (backup) | **82.1%** | 8.4% | 9.5% |
+| QB4 | 100% | — | — |
+
+Read the QB2 row. His *average* share is 0.127, and he is at 0.127
+**essentially never** — he throws nothing four weeks in five and the whole
+game one week in ten. Any smooth bell-shaped distribution centred on his
+average describes a week that does not happen. The mean comes out right
+and every probability comes out wrong.
+
+**The fix** was to stop assuming a shape and just use the real one: the
+model now draws a QB's share from the actual historical distribution for
+his depth-chart slot. His own level is preserved by mixing that
+distribution with "throws nothing" or "takes every snap" as needed — which
+is the honest reading anyway, since a QB's share is really a *probability
+of starting*, not a fraction of a start.
+
+**Result.** Passing-yards distribution error fell 14.6% on the players who
+get lines, and the systematic under-pricing of QB overs disappeared:
+
+| line | before | after | actually happened |
+|---|---|---|---|
+| over 174.5 | 19.8% | **25.6%** | 25.7% |
+| over 224.5 | 11.2% | **16.6%** | 17.6% |
+
+**QB4 is worth a look.** He has thrown a pass in zero of 137 recorded
+games. The old model projected him for 8.59 passing yards.
+""",
+    },
+    {
+        "state": "warning",
+        "area": "Deep depth-chart ranks",
+        "reading": "WR7 2.5× · RB4 2.5×",
+        "short": "Over-predicts deep reserves. Books do not price these "
+                 "players, so it costs correctness rather than money.",
+        "detail": """
+**What is wrong.** For players buried on the depth chart, the model
+projects roughly 2.5× what they actually get. A WR7 is projected for 0.090
+targets and gets 0.036.
+
+**Put that in proportion.** The error is **0.054 targets per player-week**
+— about one extra target every twenty games. Books do not post lines on
+seventh receivers, so this costs correctness, not money. It is a yellow
+row rather than a red one for exactly that reason.
+
+**What was tried and did not work** (2026-09-12). The obvious explanation
+is stale history: a player at WR7 today was a WR3 a month ago and carries
+a WR3 average. That is *real* — current WR7s held a mean rank of 3.56 over
+their last eight games and produced at 2.33× the WR7 rate.
+
+So the fix was built: express a player's usage as a multiple of whatever
+role he held at the time, then apply that multiple to the role he holds
+now. It worked mechanically — the raw rate fell from 0.455 to 0.144,
+landing exactly on target — **and the prediction got worse**, 2.5× to
+3.4×.
+
+**Why.** The fix swaps "his old role's production" for "full credit for
+the role he holds now", and a deep role is not worth full credit. Ranks
+below about four turn over constantly, and a newly-arrived TE4 does not
+get what a settled TE4 gets. Promotions moved up more than demotions moved
+down.
+
+**What that rules out.** The stale-history explanation is now closed by
+measurement rather than argument. The remaining hypothesis is about the
+depth chart itself: below about rank four it may simply not be
+informative enough to carry a prediction at all. If so the answer is a
+different input — snap share, say — not a better estimator.
+
+*(The same change **helped** quarterbacks, where QB1 vs QB2 is a real
+distinction rather than a slowly-updating line on a chart, so it ships
+for QBs only.)*
+""",
+    },
+    {
+        "state": "critical",
+        "area": "Beating the book",
+        "reading": "unmeasured",
+        "short": "One captured week. Needs ~12–15 scored weeks before the "
+                 "question can even be asked.",
+        "detail": """
+**This is the only row that decides whether any of this is worth
+anything, and it is blank.**
+
+Everything else on this page compares the model to *itself* or to a weak
+baseline. Beating a book is a different and much harder bar, and it has
+not been attempted, because attempting it needs scored weeks and there is
+one.
+
+**What gets measured.** When a week finishes, the model's probability and
+the book's de-vigged probability are compared **on identical rows** —
+same players, same lines, both committed before kickoff so neither side
+can be adjusted afterwards. The score is pooled Brier skill.
+
+**Why ~12–15 weeks.** A week gives about 600 priced props. The gap worth
+detecting is small — on the order of 0.01 to 0.02 in skill — while one
+week of 600 rows carries an uncertainty of roughly ±0.04 around the
+measured gap. Uncertainty shrinks with the square root of the sample, so
+going from ±0.04 to ±0.012 takes roughly ten times the rows. That is
+twelve to fifteen weeks, and there is no way to hurry it.
+
+**What to expect.** The market probably wins. That is the normal result
+and is not a failure — closing lines are very hard to beat. The question
+is by how much, and whether the gap shrinks as the model improves.
+
+**Until then:** treat this as a research instrument, not a source of bets.
+""",
+    },
+    {
+        "state": "warning",
+        "area": "Availability flag",
+        "reading": "logged, feeds nothing",
+        "short": "Deliberately inert until ~20 scored weeks say whether it "
+                 "earns a place.",
+        "detail": """
+**What it is.** Every player on every slate carries his injury-report
+status — Questionable, Doubtful, and so on. The model **does not use it**.
+It is written down and fed to nothing.
+
+**Why on purpose.** A feature that sounds obviously useful is exactly the
+kind that gets wired in on vibes and quietly makes things worse. Logging
+it first costs nothing and buys a real answer later: after enough scored
+weeks, check whether flagged players underperformed their projections. If
+they did, wire it in. If not, delete the column. Nothing was ever at risk
+either way.
+
+**What the evidence says so far, and it is thin:**
+
+| bucket | players | projected | actual | gap |
+|---|---|---|---|---|
+| no report listed | 776 | 0.774 | 0.705 | −0.069 |
+| Questionable | 47 | 0.808 | 0.660 | **−0.149** |
+
+Flagged players do miss badly — more than twice the gap. But they were
+5.7% of the group, so removing them moved the overall number only from
+−0.073 to −0.069. **Real per player, negligible in aggregate, n = 47.**
+That is suggestive and it is not evidence.
+""",
+    },
+]
+
+
+def view_health():
+    st.subheader("Is the model any good?")
+    st.markdown(
+        '<div class="lede">'
+        "Short version: <b>the projections are trustworthy as projections</b> "
+        "— right on average, and now roughly right about their own "
+        "uncertainty. <b>Whether they beat a bookmaker is unknown</b>, because "
+        "that takes scored weeks and there is one. Every number below was "
+        "measured on real seasons, one week at a time, with the model only "
+        "ever seeing earlier weeks."
+        "</div>", unsafe_allow_html=True)
+
+    st.markdown("### How to read the numbers")
+    _metric_primer()
 
     st.divider()
-    st.subheader("The weekly routine")
+    st.markdown("### The scorecard")
+    st.caption("Click any row to open the full explanation.")
+
+    ICON = {"good": "🟢", "warning": "🟡", "critical": "🔴"}
+    WORD = {"good": "healthy", "warning": "known issue",
+            "critical": "not yet measured"}
+    for it in ISSUES:
+        head = (f"{ICON[it['state']]}  **{it['area']}** — {it['reading']}  "
+                f"· _{WORD[it['state']]}_")
+        with st.expander(head, expanded=False):
+            st.markdown(f"**{it['short']}**")
+            st.markdown(it["detail"])
+    st.caption(
+        "The icon, the word and the wording all carry the state, so it never "
+        "depends on colour alone.")
+
+    st.divider()
+    st.markdown("### What would change the verdict")
+    st.markdown(
+        "One number, and only one: **the model's pooled Brier skill against "
+        "the book's, on identical priced rows.** It appears at the bottom of "
+        "`python score_slate.py` once a week has been scored. Nothing else on "
+        "this page — not the level, not the width, not climatology — settles "
+        "whether the model is worth money."
+    )
+
     c1, c2 = st.columns(2, gap="large")
     with c1:
         st.markdown("**Wednesday**")
@@ -613,7 +891,7 @@ def view_health():
         df = load_parquet(slates[0])
         if df is not None and "availability" in df:
             st.divider()
-            st.subheader("Injury report, current slate")
+            st.markdown("### Injury report, current slate")
             counts = (df.groupby("availability")["player_id"].nunique()
                         .reset_index(name="players")
                         .sort_values("players", ascending=False))
@@ -636,6 +914,9 @@ def view_health():
             st.altair_chart((ch + lab).properties(height=max(120, 30 * len(counts)))
                             .configure_view(stroke=None),
                             use_container_width=True)
+            st.caption(
+                "Counted, shown, and fed to no model — see the scorecard row "
+                "above for why.")
 
 
 # --- app ---------------------------------------------------------------
