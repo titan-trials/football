@@ -124,13 +124,32 @@ def restrict_to_available(roster: pl.DataFrame, statuses, season: int,
 
 
 def kickoffs(season: int, week: int) -> pl.DataFrame:
-    """Per-team kickoff time for the week. Five windows, not one."""
+    """
+    Per-team kickoff time for the week, in UTC. Five windows, not one.
+
+    NFLVERSE `gametime` IS EASTERN, AND `now` IS UTC. Converting is not
+    cosmetic: the first version compared a naive Eastern kickoff against a
+    naive UTC clock, so every row was marked "not clean" starting four
+    hours before its game actually kicked off (five in winter). The error
+    was in the safe direction -- it never called a post-kickoff row clean,
+    which is the direction that would have let hindsight in -- but it threw
+    away four hours of legitimately clean rows and froze them early in
+    `preserve_committed_rows`.
+
+    Stored tz-naive in UTC so it compares directly with
+    `datetime.now(timezone.utc).replace(tzinfo=None)`, which is what the
+    rest of this file uses.
+    """
     sch = load_schedules().filter((pl.col("season") == season) & (pl.col("week") == week))
     if sch.is_empty():
         return pl.DataFrame()
     k = sch.with_columns(
         (pl.col("gameday").cast(pl.Utf8) + " " + pl.col("gametime").fill_null("13:00"))
-        .str.to_datetime("%Y-%m-%d %H:%M", strict=False).alias("kickoff"))
+        .str.to_datetime("%Y-%m-%d %H:%M", strict=False)
+        .dt.replace_time_zone("America/New_York", ambiguous="earliest")
+        .dt.convert_time_zone("UTC")
+        .dt.replace_time_zone(None)
+        .alias("kickoff"))
     return pl.concat([
         k.select([pl.col("home_team").alias("team"), "kickoff", "game_id"]),
         k.select([pl.col("away_team").alias("team"), "kickoff", "game_id"]),

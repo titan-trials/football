@@ -190,6 +190,80 @@ def leaderboard_chart(df: pd.DataFrame, value: str, label: str,
 
 # --- views -------------------------------------------------------------
 
+def games_panel(df: pd.DataFrame, season: int, week: int):
+    """
+    The week's actual schedule, with what has already happened.
+
+    THIS PANEL EXISTS BECAUSE THE PAGE WAS CONFUSING WITHOUT IT. It said
+    "16 games" and stopped, which invites the reasonable question "but
+    aren't some of those today?" An NFL week is not a calendar week -- week
+    1 of 2026 runs Wednesday the 9th through Monday the 14th -- so a slate
+    routinely holds games that are finished, games kicking off in an hour,
+    and games two days away, all at once.
+    """
+    if "kickoff" not in df.columns or "game_id" not in df.columns:
+        return
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    g = (df.dropna(subset=["kickoff"])
+           .groupby("game_id")
+           .agg(kickoff=("kickoff", "min"),
+                teams=("team", lambda s: " @ ".join(sorted(set(s))[:2])),
+                players=("player_id", "nunique"))
+           .reset_index()
+           .sort_values("kickoff"))
+    if g.empty:
+        return
+
+    # Kicked off more than ~3.5 hours ago is over; inside that window it is
+    # being played right now. An NFL game runs about three hours.
+    mins = (now - g["kickoff"]).dt.total_seconds() / 60.0
+    g["status"] = np.where(mins > 210, "Final",
+                  np.where(mins >= 0, "Playing now", "Upcoming"))
+    g["when"] = g["kickoff"].dt.strftime("%a %d %b · %H:%M UTC")
+    g["in_hours"] = (-mins / 60.0).round(1)
+
+    n_up = int((g["status"] == "Upcoming").sum())
+    n_now = int((g["status"] == "Playing now").sum())
+    n_done = int((g["status"] == "Final").sum())
+
+    # <b>, not ** -- this string goes inside an HTML block, where markdown
+    # bold renders as literal asterisks.
+    bits = []
+    if n_done:
+        bits.append(f"<b>{n_done} already played</b>")
+    if n_now:
+        bits.append(f"<b>{n_now} being played right now</b>")
+    if n_up:
+        nxt = g[g["status"] == "Upcoming"].iloc[0]
+        bits.append(f"<b>{n_up} still to come</b> — next in "
+                    f"{nxt['in_hours']:.0f}h ({nxt['when']})")
+    st.markdown(
+        '<div class="lede">'
+        f"An NFL week is not a calendar week. <b>Week {week}</b> runs "
+        f"{g['kickoff'].min():%a %d %b} to {g['kickoff'].max():%a %d %b}, and "
+        f"right now: " + ", ".join(bits) + ". Every one of these games is in "
+        "the slate below."
+        "</div>", unsafe_allow_html=True)
+
+    ICON = {"Final": "✓", "Playing now": "●", "Upcoming": "○"}
+    g["st"] = g["status"].map(ICON) + "  " + g["status"]
+    st.dataframe(
+        g[["st", "teams", "when", "players"]],
+        use_container_width=True, hide_index=True, height=min(430, 38 * len(g) + 40),
+        column_config={
+            "st": st.column_config.TextColumn("Status", width="small"),
+            "teams": st.column_config.TextColumn("Game", width="small"),
+            "when": st.column_config.TextColumn("Kickoff", width="medium"),
+            "players": st.column_config.NumberColumn(
+                "Players projected", format="%d"),
+        })
+    st.caption(
+        "Times are UTC — Eastern is UTC−4 in September, Pacific UTC−7. "
+        "Projections for a game that has already kicked off are frozen as "
+        "they were committed beforehand; re-running never overwrites them.")
+
+
 def view_week(path: str, df: pd.DataFrame):
     season, week = season_week(path)
 
@@ -198,7 +272,7 @@ def view_week(path: str, df: pd.DataFrame):
     stamp = df["predicted_at"].max() if "predicted_at" in df else None
     games = df["game_id"].nunique() if "game_id" in df else 0
     cards([
-        ("Games", f"{games}", f"{df['team'].nunique()} teams"),
+        ("Games", f"{games}", f"{df['team'].nunique()} teams this week"),
         ("Players", f"{df['player_id'].nunique():,}", f"{len(df):,} projections"),
         ("Locked in", f"{n_clean:,}", "committed before kickoff"),
         ("Injury-flagged", f"{flagged:,}", "rows carrying a report"),
@@ -210,6 +284,10 @@ def view_week(path: str, df: pd.DataFrame):
             "Every player reads CLEAR. If this week's injury report has not "
             "published yet that means the report is **absent**, not that "
             "everyone is healthy. Re-run after Wednesday.")
+
+    st.subheader("This week's games")
+    games_panel(df, season, week)
+    st.divider()
 
     props = [p for p in PROP_LABEL if p in set(df["prop"])]
     props += [p for p in sorted(set(df["prop"])) if p not in props]
@@ -274,8 +352,11 @@ def view_week(path: str, df: pd.DataFrame):
 
     show = t.copy()
     show["prop"] = show["prop"].map(fmt)
-    cols = [c for c in ["player_name", "team", "position", "prop", "expected",
-                        "exp_opportunities", "availability"] if c in show.columns]
+    if "kickoff" in show.columns:
+        show["kicks"] = pd.to_datetime(show["kickoff"]).dt.strftime("%a %H:%M")
+    cols = [c for c in ["player_name", "team", "kicks", "position", "prop",
+                        "expected", "exp_opportunities", "availability"]
+            if c in show.columns]
     line_cols = [c for c in show.columns if c.startswith("over_")]
     show = show.sort_values("expected", ascending=False)[cols + line_cols]
     st.dataframe(
@@ -283,6 +364,8 @@ def view_week(path: str, df: pd.DataFrame):
         column_config={
             "player_name": st.column_config.TextColumn("Player", width="medium"),
             "team": st.column_config.TextColumn("Tm", width="small"),
+            "kicks": st.column_config.TextColumn(
+                "Kickoff", width="small", help="UTC"),
             "position": st.column_config.TextColumn("Pos", width="small"),
             "prop": st.column_config.TextColumn("Prop", width="medium"),
             "expected": st.column_config.NumberColumn("Projected", format="%.1f"),
