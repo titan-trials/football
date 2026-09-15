@@ -336,3 +336,213 @@ ROLE_RELATIVE_POSITIONS = ("QB",)
 # constraint the deep-bucket attempt hit a day earlier. Fixing that needs a
 # better read on role than a depth chart provides, not a better estimator.
 CROSS_TEAM_HISTORY = True
+
+
+# ---------------------------------------------------------------------
+# SHARE_PRIOR_K
+#
+# Override the empirical-Bayes shrinkage strength of the SHARE model, in
+# games. None keeps the estimated value.
+#
+# WHY AN OVERRIDE IS LEGITIMATE HERE. `estimate_prior_strength_counts` is
+# the right answer when the shrinkage TARGET is unbiased. Ours is not:
+#
+#   population books price (trailing rate >= 3 targets/game, n = 8,758)
+#     the player's own prior-season rate   overshoots by -0.673
+#     the depth-chart role prior           undershoots by +0.636
+#
+# The two bracket the truth. EB does not know the prior is biased, so it
+# solves a variance problem and lands at the k = 0.5 clip floor, which is
+# w = 0.941 on own history at n = 8. Nearly no shrinkage at all.
+#
+# WHAT THAT COSTS. With every player carrying essentially his own raw
+# trailing rate, the served roster's rates sum to MORE than the predicted
+# team volume -- a WR4 whose 4-targets-a-game came from a stretch when the
+# WR1 was hurt brings that rate onto a healthy roster. Per-team
+# normalisation then squeezes the excess out of everyone uniformly,
+# starters included:
+#
+#   2026 wk1, 145 priced players
+#     their own trailing-8 mean            4.602 targets
+#     what the model served                3.902          a 15% cut
+#
+# and zero-filling is not the cause -- only 5.9% of those listed weeks had
+# zero targets, and the played-only mean is 4.766.
+#
+# MEASURED, 2022-2025, depth-chart-joined, zero-filled, causal trailing-8,
+# 33,877 player-games (8,758 of them book-like):
+#
+#     k     w@n=8 | ALL rows RMSE    bias | BOOK-LIKE RMSE    bias
+#     0.5   0.941 |         ~2.246  -0.07 |        ~3.62    -0.45
+#     2     0.800 |          2.2282 -0.065|         3.5833  -0.256
+#     4     0.667 |          2.2192 -0.053|         3.5628  -0.035
+#     6     0.571 |          2.2239 -0.045|         3.5651  +0.115
+#     8     0.500 |          2.2330 -0.040|         3.5752  +0.224
+#    22     0.267 |          2.2941 -0.024|         3.6554  +0.569
+#
+# k = 4 is optimal on BOTH populations, on RMSE, and it is where the
+# book-like bias crosses zero. The optimum is flat from 2 to 8 rather than
+# a knife edge, so this is not a fitted parameter.
+#
+# It should also move share from backups to starters after normalisation:
+# shrinking toward a role prior costs a backup proportionally far more
+# than a starter (backup rate 2.0 toward prior 0.3 loses 28%; starter 8.0
+# toward 6.0 loses 8%), and normalisation hands the difference back to the
+# top of the depth chart.
+#
+# VALIDATED END-TO-END 2026-09-13, AND REJECTED.
+#
+# compare_props.py --props receptions receiving_yards --min-week 1,
+# identical command both runs, n = 9,824 each:
+#
+#   setting        CRPS recv   CRPS rec   skill recv   skill rec   bias
+#   k estimated       6.629      0.536      +0.1143     +0.1069   +0.41/+0.02
+#   (lands at 0.5)
+#   k = 4             6.678      0.540      +0.1078     +0.1006   +0.42/+0.02
+#
+# Worse on every measure, and worse at every book-style line in the Brier
+# table too. k = 4 is NOT shipped.
+#
+# WHY THE OFFLINE SWEEP LIED. The sweep scored the shrunk RATE directly
+# against realised targets. The model never uses the rate that way: the
+# rate becomes a share, and `team_vector` renormalises shares per team.
+# Normalisation is scale-invariant, so the absolute level the sweep was
+# optimising is divided straight back out. Only the RELATIVE pattern of
+# rates within a team survives, and k = 0.5 gives the better one.
+#
+# The corollary matters more than the flag: the 15% gap between a priced
+# player's trailing-8 mean (4.602) and what the model serves (3.902) is
+# NOT a leak. It is normalisation pinning the team total, which is
+# separately correct at 29.9 vs 30.5 actual. There is nothing to recover
+# there.
+#
+# WHAT IS STILL UNEXPLAINED. On the served backtest population the model
+# is essentially unbiased (+0.41 yards on a mean of 12.4, +0.02 receptions
+# on 1.1). On the subset books actually price it sits under the book on
+# 86.1% of props. An unbiased model that is one-directionally wrong on the
+# priced subset is a SELECTION effect, not a level error -- something
+# about which players get lines, or which lines get posted, that the
+# served population does not contain. That is the next thing to chase,
+# and no shrinkage setting will touch it.
+#
+# The override plumbing is kept: it is cheap, it is now tested, and the
+# next person to suspect shrinkage can re-measure in one command.
+SHARE_PRIOR_K = None
+
+
+# ---------------------------------------------------------------------
+# CROSS_TEAM_BLEND_W
+#
+# How much weight a player who CHANGED TEAMS gets on his own absolute
+# rate, against the role-scaled estimate CROSS_TEAM_HISTORY produces.
+# 0.0 is the old behaviour exactly.
+#
+# WHAT WAS ACTUALLY WRONG WITH THE OLD MEASUREMENT. CROSS_TEAM_HISTORY
+# compared two settings: role-scaled (w = 0) and "full history, shrunk"
+# (w ~ 1). Full history lost, so the idea was dropped. Nobody measured
+# anything in between, and the optimum is not at either end.
+#
+# MEASURED 2022-2025, depth-chart-joined, zero-filled, prior-season own
+# rate against the contemporaneous role prior, best blend by RMSE:
+#
+#   regime            population      hist   chart | best w   RMSE   gain
+#   week 1            all       n=869 2.4302 2.4599|  0.55  2.3305 +0.1295
+#   week 1            movers    n=195 2.2491 2.1376|  0.35  2.0826 +0.0550
+#   weeks 2-4         movers    n=601 2.2688 2.1350|  0.35  2.0820 +0.0529
+#   weeks 5+          movers   n=3329 2.5233 2.3715|  0.35  2.3054 +0.0661
+#
+# w = 0.35 for movers in EVERY regime, and it beats chart-only in every
+# one. Note the chart still beats history outright for movers (2.14 vs
+# 2.25) -- which is why w is well below 0.5 and why "full history" lost.
+#
+# WHY THIS IS WORTH RE-TESTING AFTER SHARE_PRIOR_K FAILED. That flag
+# moved every player toward the role prior with one k, which per-team
+# normalisation largely divides back out. This does not: it changes the
+# relative standing of movers against the teammates they are normalised
+# against, and only movers. Different mechanism, so the earlier negative
+# result does not transfer.
+#
+# AND A REASON TO DISTRUST THE VALIDATION ITSELF. Measured 2026-09-13:
+# the 2026 depth chart is a STATIC PRESEASON SNAPSHOT -- 98.5% of
+# player-slots hold the identical rank from week 1 to week 9, against 69%
+# in 2025, and only 1.7% of 2026 slots ever change rank at all versus
+# 57-62% in 2022-2025. Everything above is measured on charts that
+# updated in-season. The chart the live slate is served is a different
+# and worse object, so if anything these weights understate how much the
+# live board should lean on history.
+#
+# NOT YET VALIDATED END TO END. Measure with
+#   compare_props.py --props receptions receiving_yards --min-week 1 \
+#       --cross-team-w 0.35
+# against CRPS 6.629 recv / 0.536 rec, skill +0.1143 / +0.1069.
+CROSS_TEAM_BLEND_W = 0.35
+
+# Deepest role bucket CROSS_TEAM_BLEND_W applies to. Measured 2026-09-13:
+# at w = 0.35 with NO bucket limit the blend fixed Waller (P(over 1.5)
+# 0.096 -> 0.282 against the book's 0.60) but moved 183 of 518 receivers
+# and handed absurd multiples to deep reserves whose history is stale --
+# A.T. Perry 0.040 -> 0.841 expected targets (21x), DJ Turner 0.043 ->
+# 0.890 (20x), Sterling Shepard 0.095 -> 1.035 (11x). Per-team
+# normalisation then takes that volume straight off the starters books
+# price, and the wk1 mean edge went -0.1411 -> -0.1472.
+#
+# A deep bucket is the chart SAYING the player is buried, which for a WR7
+# is usually right. A bucket-1-3 player's ordinal position is a preseason
+# guess about a genuine contributor, which is where his own level is worth
+# something. Waller is TE3, so he survives the limit.
+CROSS_TEAM_BLEND_MAX_BUCKET = 3
+
+
+# ---------------------------------------------------------------------
+# SNAP_DERIVED_ROLE
+#
+# Re-rank each position group by PRIOR-WEEK OFFENSIVE SNAP SHARE where it
+# exists, instead of trusting the depth chart's ordering. Chart order is
+# kept for anyone with no snap number, and they sort below everyone who
+# has one -- not having taken a snap is itself evidence.
+#
+# WHY THE CHART NEEDS REPLACING AT ALL. Measured 2026-09-13: the 2026
+# depth chart is a STATIC PRESEASON SNAPSHOT. 98.5% of player-slots hold
+# an identical rank from week 1 to week 9, and only 1.7% ever change rank
+# all season, against 57-62% in 2022-2025. It cannot incorporate camp,
+# injuries or what actually happened on Sunday. A snap count can.
+#
+# WHY THIS IS NOT THE REFUTED PRODUCTION RE-RANK. Ranking by prior-season
+# production measured WORSE than the chart (2.7431 vs 2.6974). Ranking by
+# prior-week snaps measures BETTER, on identical rows (n = 22,232,
+# 2022-2025, weeks 2+, causally lagged):
+#
+#     chart prior          RMSE 2.7336   bias +0.1344
+#     SNAP-ranked prior    RMSE 2.6536   bias -0.0297
+#
+# Better on RMSE *and* it nearly zeroes the bias. Production is an
+# outcome carrying every confound that implies; a snap count is a direct
+# observation of whether the staff put him on the field.
+#
+# It moves 50.3% of 2025 skill-position rows, which is the size of the
+# disagreement between what the chart says and what teams did.
+#
+# WEEK 1 GETS NOTHING. There is no prior game, so week 1 keeps the chart
+# and Darren Waller's week-1 price is unaffected by this flag.
+#
+# VALIDATED END TO END AND TURNED ON 2026-09-13.
+# compare_props.py --props receptions receiving_yards --min-week 2,
+# identical command, n = 9,358 each:
+#
+#   setting       CRPS recv  CRPS rec  skill recv  skill rec  bias recv
+#   chart roles      6.559     0.529     +0.1084    +0.1027     +0.36
+#   SNAP roles       6.531     0.526     +0.1123    +0.1075     +0.35
+#
+# Better on every measure, and the Brier table over nine book-style lines
+# is 9 better, 0 worse -- gains of +0.0024 to +0.0054 at every single
+# line. That is an order of magnitude larger than CROSS_TEAM_BLEND_W,
+# whose whole Brier table moved by 0.0001 either way, and unlike that
+# flag this one did not need a live-board argument to justify it.
+#
+# This is the first change to the role signal itself that has survived.
+# Four earlier attempts to fix the same problem did not: the per-player
+# checkmark, full cross-team history, the production re-rank, and
+# SHARE_PRIOR_K. The difference is that snaps are a DIFFERENT INPUT
+# rather than a better estimator over the same input -- which is exactly
+# what the deep-bucket negative result concluded would be needed.
+SNAP_DERIVED_ROLE = True

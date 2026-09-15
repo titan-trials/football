@@ -46,7 +46,7 @@ import numpy as np
 import polars as pl
 
 from data.availability import attach, flag_frame, report_published
-from data.depth import role_bucket, role_ranks, with_player_names
+from data.depth import apply_snap_ranks, prior_week_snaps, role_bucket, role_ranks, with_player_names
 from data.nflverse import (load_pbp, load_player_stats, load_rosters_weekly,
                            load_schedules, upcoming_week)
 from features.efficiency import PerOpportunityModel, ShapeModel, prob_over, total_pmf
@@ -55,7 +55,9 @@ from features.props import (
     player_games, roster_player_games, shape_per_game, team_games,
 )
 from features.usage import ShareModel, TeamVolumeModel, opportunity_pmf
-from model_flags import (CROSS_TEAM_HISTORY, ROLE_RELATIVE_POSITIONS,
+from model_flags import (
+    CROSS_TEAM_BLEND_W, CROSS_TEAM_BLEND_MAX_BUCKET, CROSS_TEAM_HISTORY,
+    SNAP_DERIVED_ROLE, ROLE_RELATIVE_POSITIONS,
                          SHARE_DISPERSION, SHARE_MIXTURE_POSITIONS)
 
 SLATE_DIR = "slates"
@@ -184,7 +186,9 @@ def predict_prop(spec, pbp, ps, rr, season, week, trailing, prior_seasons, roste
                          share_dispersion=SHARE_DISPERSION,
                          mixture_positions=SHARE_MIXTURE_POSITIONS,
                          role_relative=ROLE_RELATIVE_POSITIONS,
-                         cross_team=CROSS_TEAM_HISTORY)
+                         cross_team=CROSS_TEAM_HISTORY,
+                         cross_team_w=CROSS_TEAM_BLEND_W,
+                         cross_team_max_bucket=CROSS_TEAM_BLEND_MAX_BUCKET)
 
     if spec.has_shape:
         per_opp = PerOpportunityModel.fit(
@@ -320,7 +324,10 @@ def main(season, week, trailing, prior_seasons, props):
 
     pbp = load_pbp(seasons)
     ps = load_player_stats(seasons)
-    rr = role_ranks(seasons).with_columns(role_bucket(pl.col("role_rank")).alias("role_bucket"))
+    rr = role_ranks(seasons)
+    if SNAP_DERIVED_ROLE:
+        rr = apply_snap_ranks(rr, prior_week_snaps(seasons))
+    rr = rr.with_columns(role_bucket(pl.col("role_rank")).alias("role_bucket"))
     try:
         statuses = load_rosters_weekly(seasons)
     except Exception as e:  # noqa: BLE001

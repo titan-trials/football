@@ -56,7 +56,7 @@ import argparse
 import numpy as np
 import polars as pl
 
-from data.depth import role_bucket, role_ranks
+from data.depth import apply_snap_ranks, prior_week_snaps, role_bucket, role_ranks
 from data.nflverse import load_pbp, load_player_stats, load_rosters_weekly
 from features.efficiency import PerOpportunityModel, ShapeModel, prob_over, total_pmf
 from features.props import (
@@ -68,7 +68,9 @@ from model.scoring import brier_skill, crps_pmf
 # THE SAME FUNCTION THE PREDICTOR USES, not a copy of it. The whole point of
 # this rewrite is that the harness and the predictor cannot disagree about
 # who is on the slate, and two implementations of one rule always drift.
-from model_flags import (CROSS_TEAM_HISTORY, ROLE_RELATIVE_POSITIONS,
+from model_flags import (
+    SHARE_PRIOR_K, CROSS_TEAM_BLEND_W, CROSS_TEAM_BLEND_MAX_BUCKET, CROSS_TEAM_HISTORY,
+    SNAP_DERIVED_ROLE, ROLE_RELATIVE_POSITIONS,
                          SHARE_DISPERSION, SHARE_MIXTURE_POSITIONS)
 from predict_slate import restrict_to_available
 
@@ -156,7 +158,9 @@ def run_prop(spec, pbp, ps, rr, score_season, min_week, trailing, prior_seasons,
              share_dispersion=SHARE_DISPERSION,
              mixture_positions=SHARE_MIXTURE_POSITIONS,
              role_relative=ROLE_RELATIVE_POSITIONS,
-             cross_team=CROSS_TEAM_HISTORY):
+             cross_team=CROSS_TEAM_HISTORY,
+             cross_team_w=CROSS_TEAM_BLEND_W,
+             prior_k=SHARE_PRIOR_K):
     """
     `population` selects the rows that get SCORED:
 
@@ -208,7 +212,10 @@ def run_prop(spec, pbp, ps, rr, score_season, min_week, trailing, prior_seasons,
                              share_dispersion=share_dispersion,
                              mixture_positions=mixture_positions,
                              role_relative=role_relative,
-                             cross_team=cross_team)
+                             cross_team=cross_team,
+                             cross_team_w=cross_team_w,
+                             cross_team_max_bucket=CROSS_TEAM_BLEND_MAX_BUCKET,
+                             prior_k=prior_k)
 
         if spec.has_shape:
             fit_rows = past_rows.drop_nulls("asof_shape")
@@ -334,6 +341,16 @@ if __name__ == "__main__":
     ap.add_argument("--population", choices=["served", "stats"], default="served",
                     help="rows to score; served is what predict_slate produces")
     ap.add_argument("--tag", default="", help="suffix for the cached parquet")
+    ap.add_argument("--snap-roles", dest="snap_roles", action="store_true",
+                    default=SNAP_DERIVED_ROLE,
+                    help="re-rank position groups by prior-week snap share")
+    ap.add_argument("--no-snap-roles", dest="snap_roles", action="store_false")
+    ap.add_argument("--cross-team-w", type=float, default=CROSS_TEAM_BLEND_W,
+                    help="weight a mover's own absolute rate gets against "
+                         "the role-scaled estimate; 0 is the old behaviour")
+    ap.add_argument("--prior-k", type=float, default=SHARE_PRIOR_K,
+                    help="override share-model shrinkage strength in games; "
+                         "omit to use the estimated value")
     ap.add_argument("--share-dispersion", action="store_true",
                     default=SHARE_DISPERSION,
                     help="beta-binomial share instead of a fixed one")
@@ -354,7 +371,10 @@ if __name__ == "__main__":
 
     pbp = load_pbp(a.seasons)
     ps = load_player_stats(a.seasons)
-    rr = role_ranks(a.seasons).with_columns(role_bucket(pl.col("role_rank")).alias("role_bucket"))
+    rr = role_ranks(a.seasons)
+    if a.snap_roles:
+        rr = apply_snap_ranks(rr, prior_week_snaps(a.seasons))
+    rr = rr.with_columns(role_bucket(pl.col("role_rank")).alias("role_bucket"))
     try:
         statuses = load_rosters_weekly(a.seasons)
     except Exception as e:  # noqa: BLE001
@@ -369,7 +389,8 @@ if __name__ == "__main__":
         df = run_prop(spec, pbp, ps, rr, a.score_season, a.min_week,
                       a.trailing, a.prior_seasons, statuses, a.fit, a.population,
                       a.share_dispersion, tuple(a.mixture_positions),
-                      tuple(a.role_relative), a.cross_team)
+                      tuple(a.role_relative), a.cross_team, a.cross_team_w,
+                      a.prior_k)
         if df.is_empty():
             print(f"  {name}: no rows")
             continue
@@ -384,7 +405,10 @@ if __name__ == "__main__":
           f"\n  share dispersion: {'BETA-BINOMIAL' if a.share_dispersion else 'fixed share'}"
           f"\n  empirical share mixture: {', '.join(a.mixture_positions) or 'none'}"
           f"\n  role-relative share: {', '.join(a.role_relative) or 'none'}"
-          f"\n  cross-team history: {a.cross_team}")
+          f"\n  cross-team history: {a.cross_team}"
+          f"\n  share prior_k: {'estimated' if a.prior_k is None else a.prior_k}"
+          f"\n  cross-team blend w: {a.cross_team_w}"
+          f"\n  snap-derived roles: {a.snap_roles}")
     print(f"{'='*86}")
     print(f"{'prop':18} {'n':>6} {'mean':>8} {'CRPS':>8} {'clim':>8} {'skill':>8} {'shape':>8} {'bias':>8}")
     for r in sorted(results, key=lambda x: -x["crps_skill_vs_clim"]):

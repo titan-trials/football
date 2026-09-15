@@ -51,7 +51,7 @@ import nflreadpy as nfl
 import polars as pl
 
 from data.cache import DEFAULT_TTL_HOURS, load_cached, save_cache
-from data.nflverse import load_schedules
+from data.nflverse import load_rosters_weekly, load_schedules
 
 # QB is here because passing_yards needs a depth-chart row to appear on a
 # slate at all. Without it predict_slate produced 0 passing rows and said
@@ -283,3 +283,113 @@ def era_consistency(shares: pl.DataFrame) -> pl.DataFrame:
         .agg([pl.col("share").mean().alias("mean_share"), pl.len().alias("n")])
         .sort(["role_pos", "bucket", "era"])
     )
+
+
+def prior_week_snaps(seasons, through_week=None) -> pl.DataFrame:
+    """
+    Each player's offensive snap share from his team's PREVIOUS game.
+
+    Returns season, week, team, player_id, snap_prev -- where `week` is the
+    week the number may be USED for, not the week it was earned. Week 1 has
+    no row, by construction.
+
+    WHY LAGGED, AND WHY THAT IS NOT A LIMITATION. `config.SERVE_TIME_FEEDS`
+    lists snap_counts as "week N-1": the feed lands after games, so the only
+    snap number legitimately visible before kickoff is the previous game's.
+    Lagging here is what makes it servable, not a concession.
+
+    The feed is keyed on `pfr_player_id`, not gsis. The crosswalk comes from
+    rosters_weekly, which carries both. Rows that fail to cross over are
+    dropped rather than guessed -- a wrong join here would move share to the
+    wrong player, which is the failure mode this whole module exists to
+    avoid.
+    """
+    from data.nflverse import load_snap_counts
+
+    seasons = list(seasons)
+    xw = []
+    for s in seasons:
+        try:
+            r = load_rosters_weekly([s]).select(["pfr_id", "gsis_id"])
+            xw.append(r.drop_nulls())
+        except Exception:  # noqa: BLE001
+            continue
+    if not xw:
+        return pl.DataFrame(schema={"season": pl.Int64, "week": pl.Int64,
+                                    "team": pl.Utf8, "player_id": pl.Utf8,
+                                    "snap_prev": pl.Float64})
+    xw = pl.concat(xw, how="diagonal_relaxed").unique(subset=["pfr_id"])
+
+    sn = load_snap_counts(seasons, through_week=through_week)
+    sn = (sn.select(["season", "week", "team", "pfr_player_id", "offense_pct"])
+            .with_columns([pl.col("season").cast(pl.Int64),
+                           pl.col("week").cast(pl.Int64)])
+            .drop_nulls("offense_pct")
+            .join(xw, left_on="pfr_player_id", right_on="pfr_id", how="inner")
+            .rename({"gsis_id": "player_id"})
+            .select(["season", "week", "team", "player_id", "offense_pct"]))
+
+    # Shift to the week the number is usable in. Within a season and team,
+    # a player's next appearance is the next game he is listed for, so a bye
+    # carries the last real number forward rather than blanking it.
+    sn = sn.sort(["player_id", "season", "week"])
+    sn = sn.with_columns((pl.col("week") + 1).alias("week_usable"))
+    return (sn.select([pl.col("season"), pl.col("week_usable").alias("week"),
+                       pl.col("team"), pl.col("player_id"),
+                       pl.col("offense_pct").alias("snap_prev")])
+              .unique(subset=["season", "week", "team", "player_id"]))
+
+
+def apply_snap_ranks(rr: pl.DataFrame, snaps: pl.DataFrame) -> pl.DataFrame:
+    """
+    Re-rank each position group by PRIOR-WEEK SNAP SHARE where it exists,
+    keeping the chart's ordering for anyone without a snap number.
+
+    WHY RANK AND NOT USE THE PERCENTAGE DIRECTLY. Shares are renormalised
+    per team, so any common rescaling of the rates is divided straight back
+    out -- that is what killed SHARE_PRIOR_K. Only a player's standing
+    RELATIVE to his teammates survives normalisation, so the signal has to
+    enter as an ordering. It also lets snaps reuse the role-prior machinery
+    already validated rather than introducing a second, unvalidated path
+    from a number to a share.
+
+    WHY THIS IS NOT THE REFUTED PRODUCTION RE-RANK. Ranking by prior-season
+    PRODUCTION measured WORSE than the chart (RMSE 2.7431 vs 2.6974).
+    Ranking by prior-week SNAPS measures BETTER, on identical rows:
+
+        chart prior          RMSE 2.7336   bias +0.1344
+        snap-ranked prior    RMSE 2.6536   bias -0.0297
+
+    Production is an outcome and carries every confound that goes with it.
+    A snap count is a direct observation of whether the coaching staff put
+    the player on the field last Sunday, which is the question the depth
+    chart is a stale proxy for.
+
+    Players with a snap number always sort above players without one: an
+    unmeasured player did not take the field, and the chart's opinion about
+    him is the weaker evidence.
+    """
+    need = {"season", "week", "team", "player_id", "role_pos", "role_rank"}
+    missing = need - set(rr.columns)
+    if missing:
+        raise ValueError(f"rr missing columns: {sorted(missing)}")
+    if snaps.is_empty():
+        return rr
+
+    out = rr.join(snaps, on=["season", "week", "team", "player_id"], how="left")
+    out = out.with_columns(
+        pl.when(pl.col("snap_prev").is_not_null())
+          .then(pl.lit(0)).otherwise(pl.lit(1)).alias("_tier"))
+    out = out.with_columns(
+        pl.struct(["_tier", "snap_prev", "role_rank"]).alias("_k"))
+    out = out.with_columns(
+        pl.col("snap_prev").fill_null(-1.0).alias("_snap"))
+    out = (out.sort(["season", "week", "team", "role_pos",
+                     "_tier", "_snap", "role_rank"],
+                    descending=[False, False, False, False,
+                                False, True, False])
+              .with_columns(
+                  (pl.int_range(pl.len()).over(
+                      ["season", "week", "team", "role_pos"]) + 1)
+                  .cast(pl.Int64).alias("role_rank")))
+    return out.drop(["_tier", "_snap", "_k", "snap_prev"])

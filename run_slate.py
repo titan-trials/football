@@ -123,10 +123,47 @@ def step_capture(season: int, week: int, markets: list, max_credits: int,
 # 2. predict
 # ---------------------------------------------------------------------
 
+def check_snap_feed(season: int, week: int) -> None:
+    """
+    Warn when the snap feed for last week has not fully landed.
+
+    SNAP_DERIVED_ROLE ranks each position group by PRIOR-WEEK snap share,
+    so a half-landed feed does not fail -- it silently re-ranks half of
+    every roster and leaves the other half on chart order. That is worse
+    than not using snaps at all, and it is invisible in the output.
+
+    Measured 2026-09-13: a few hours after week 1 kicked off the feed held
+    187 rows against roughly 1,200 for a complete week. It fills in over
+    the following day or two (PFR-dependent), which is why Wednesday is
+    the run and not Monday night.
+    """
+    from model_flags import SNAP_DERIVED_ROLE
+    if not SNAP_DERIVED_ROLE or week < 2:
+        return
+    try:
+        from data.nflverse import load_snap_counts
+        sn = load_snap_counts([season])
+        n = sn.filter(pl.col("week") == week - 1).height
+    except Exception as e:  # noqa: BLE001
+        print(f"  could not check the snap feed ({str(e).splitlines()[0][:60]})")
+        return
+    if n >= 900:
+        print(f"  snap feed for week {week - 1}: {n} rows -- complete")
+    else:
+        print(f"  WARNING: snap feed for week {week - 1} has only {n} rows "
+              f"(expect ~1,200).")
+        print("    Roles are ranked on prior-week snaps, so a partial feed "
+              "re-ranks")
+        print("    some rosters and not others. Wait for it to land, or run "
+              "with")
+        print("    SNAP_DERIVED_ROLE off, rather than predicting on half of it.")
+
+
 def step_predict(season: int, week: int, dry_run: bool) -> bool:
     import predict_slate
 
     path = os.path.join("slates", f"slate_{season}_wk{week}.parquet")
+    check_snap_feed(season, week)
     if dry_run:
         print(f"  would write {path}")
         print("  (re-running preserves rows for games already kicked off)")

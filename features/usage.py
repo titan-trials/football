@@ -519,7 +519,7 @@ def _fit_multipliers(df: pl.DataFrame, model, value_col: str,
 
 
 def _fit_cross_team(df: pl.DataFrame, model, value_col: str,
-                    trailing: int) -> dict:
+                    trailing: int) -> tuple:
     """
     Each player's rate and the role he held earning it, IGNORING TEAM.
 
@@ -584,7 +584,7 @@ def _fit_cross_team(df: pl.DataFrame, model, value_col: str,
     # prior is still 0.67 targets. His gap is the depth chart calling him
     # a TE3, not the missing history -- which is what the evidence says
     # even though the missing history is real and was worth fixing.
-    out = {}
+    out, level = {}, {}
     for r in agg.iter_rows(named=True):
         rate = r["_s"] / r["_n"]
         role_then = (None if r["_rp"] is None or r["_rb"] is None
@@ -595,7 +595,8 @@ def _fit_cross_team(df: pl.DataFrame, model, value_col: str,
         # Clipped: a tiny old-role prior otherwise yields a multiplier in
         # the hundreds off two lucky games.
         out[r["player_id"]] = float(np.clip(rate / base, 0.05, 6.0))
-    return out
+        level[r["player_id"]] = float(rate)
+    return out, level
 
 
 @dataclass
@@ -650,6 +651,18 @@ class ShareModel:
     # player_id -> how many times his OLD role's rate he earned. Used only
     # when (team, player_id) is absent, i.e. he changed teams.
     elsewhere: Optional[dict] = None
+    # player_id -> his OLD ABSOLUTE rate, in opportunities per game. The
+    # level, not the ratio. Present alongside `elsewhere`.
+    elsewhere_level: Optional[dict] = None
+    # How much weight a mover's own LEVEL gets against the role-scaled
+    # estimate. 0.0 reproduces the role-only behaviour exactly.
+    cross_team_w: float = 0.0
+    # Deepest role bucket the blend applies to. A WR7's chart position is
+    # the model SAYING he is buried, and that is usually right; his own
+    # history is stale evidence from a job he no longer holds. Blending
+    # there resurrects deep reserves and steals share from the starters
+    # books actually price.
+    cross_team_max_bucket: int = 3
 
     def mixture_for(self, role: Optional[tuple]) -> Optional[tuple]:
         """The role's empirical share distribution, or None to fall back."""
@@ -683,13 +696,22 @@ class ShareModel:
             share_dispersion: bool = False,
             mixture_positions: Sequence[str] = (),
             role_relative: Sequence[str] = (),
-            cross_team: bool = False) -> "ShareModel":
+            cross_team: bool = False,
+            cross_team_w: float = 0.0,
+            cross_team_max_bucket: int = 3,
+            prior_k: Optional[float] = None) -> "ShareModel":
         """
         roles: optional frame with team, player_id, role_pos, role_bucket --
         one row per player, the most recent depth-chart standing the caller
         is allowed to see. When absent the prior falls back to position,
         which measured six times worse and exists only so the model still
         runs on seasons with no usable depth chart.
+
+        prior_k: override the empirical-Bayes shrinkage strength, in GAMES.
+        None keeps the estimated value. See SHARE_PRIOR_K in model_flags for
+        why an override exists at all -- the EB estimate is the right answer
+        only when the shrinkage TARGET is unbiased, and the depth-chart role
+        prior is not.
         """
         need = {"season", "week", "team", "player_id", "position", value_col}
         missing = need - set(player_games.columns)
@@ -758,6 +780,8 @@ class ShareModel:
             np.nan_to_num(agg["_var"].to_numpy(), nan=0.0),
             min_trials=2,
         )
+        if prior_k is not None:
+            k = float(prior_k)
 
         model = cls(rates={}, counts={}, prior_k=float(k), role_priors=role_priors,
                     position_priors=position_priors, global_rate=global_rate)
@@ -784,7 +808,10 @@ class ShareModel:
                                                  set(role_relative))
 
         if cross_team:
-            model.elsewhere = _fit_cross_team(df, model, value_col, trailing)
+            model.elsewhere, model.elsewhere_level = _fit_cross_team(
+                df, model, value_col, trailing)
+            model.cross_team_w = float(cross_team_w or 0.0)
+            model.cross_team_max_bucket = int(cross_team_max_bucket)
 
         if share_dispersion:
             rc, pooled = estimate_share_concentration(
@@ -829,7 +856,20 @@ class ShareModel:
             # what his new role usually gets. Same `shrink` every other
             # rate in this model uses, so a player who moved is handled
             # like a player who did not, rather than as a stranger.
-            return float(self.elsewhere[player_id] * prior)
+            role_scaled = float(self.elsewhere[player_id] * prior)
+            w = float(self.cross_team_w or 0.0)
+            shallow = (role is not None
+                       and int(role[1]) <= int(self.cross_team_max_bucket))
+            if (w > 0.0 and shallow and self.elsewhere_level
+                    and player_id in self.elsewhere_level):
+                # HIS LEVEL IS NOT ZERO EVIDENCE. The role-scaled estimate
+                # divides his measured rate out and re-inflates it against
+                # the new role's prior, so 21 games of history reach the
+                # prediction only as a ratio. At w = 0 that is the old
+                # behaviour; above 0 his own level is carried too.
+                return float(w * self.elsewhere_level[player_id]
+                             + (1.0 - w) * role_scaled)
+            return role_scaled
         return float(shrink([0.0], [0.0], prior, self.prior_k)[0])
 
     def share_for(self, team: str, player_id: str, role: Optional[tuple] = None,

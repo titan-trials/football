@@ -1667,3 +1667,106 @@ consume more time than the market comparison.
    sorted baseline. Those were measured against the randomised climatology
    and although they were model-vs-model comparisons (so the null does not
    enter), the CRPS levels quoted for them are on the old population.
+
+## 2026-09-13 — MODEL CHANGEOVER: cross-team blend on (w = 0.35, buckets <= 3)
+
+**Flags flipped today.** Pooled scores that span this date mix two models.
+
+    CROSS_TEAM_BLEND_W          0.0  ->  0.35
+    CROSS_TEAM_BLEND_MAX_BUCKET  --   ->  3
+
+A player who changed teams used to get **zero weight on his own measured
+level**. `CROSS_TEAM_HISTORY` carried his history across as a RATIO
+against the role he held then, re-inflated against the role he holds now,
+so 21 games of Darren Waller reached the prediction only as the number
+0.847. The old experiment compared that (w = 0) against carrying his full
+old rate (w ~ 1), found full history worse, and stopped. Nothing in
+between was ever measured. The optimum is w = 0.35 in every regime
+tested, and the bucket limit keeps it off deep reserves whose history is
+stale evidence from a job they no longer hold.
+
+End to end, `compare_props.py --min-week 1`, n = 9,824:
+
+| setting | CRPS recv | CRPS rec | skill recv | skill rec |
+|---|---|---|---|---|
+| w = 0 | 6.629 | 0.536 | +0.1143 | +0.1069 |
+| w = 0.35, buckets <= 3 | 6.628 | 0.536 | +0.1144 | +0.1073 |
+
+**Those gains are noise** — the Brier table over nine book-style lines is
+5 better, 3 worse by 0.0001, 1 tied. This was shipped because it costs
+nothing in the backtest and does something visible on the live board
+(below-book 87.7% -> 86.2%, Waller 0.096 -> 0.297 against a book at
+0.60), not because the backtest endorsed it.
+
+### The wk1 slate is now a THREE-model slate
+
+Rows for games that had kicked off before 17:41 today keep their 03:42
+predictions (`preserve_committed_rows` — correct, and do not fight it).
+Only the Monday DEN @ KC game is repriced under the new flags. Week 1 was
+already mixed across the 2026-09-12 changeover. **Do not pool week 1 by
+prop without splitting on `predicted_at`.**
+
+### Also established today, and worth not re-deriving
+
+- **The 2026 depth chart is a static preseason snapshot.** 98.5% of
+  player-slots hold an identical rank from week 1 to week 9, against 69%
+  in 2025; only 1.7% of 2026 slots ever change rank, against 57-62% in
+  2022-2025. Every chart-vs-history measurement in the flags was taken on
+  charts that updated in-season. The live chart is a weaker object than
+  the one the model was validated against.
+- **Name matching is not the problem.** All 596 priced rows match at tier
+  `exact`, score 1.0, zero unmatched; the only 12 discrepancies are `Jr.`
+  suffixes.
+- **The 15% gap between a priced player's trailing-8 mean and what the
+  model serves is not a leak.** It is per-team normalisation pinning the
+  team total, which is separately correct (29.9 vs 30.5 actual).
+- **Shrinkage is not the lever.** `SHARE_PRIOR_K = 4` was measured and
+  rejected; see that flag for why an offline sweep endorsed it and the
+  end-to-end run did not.
+
+## 2026-09-13 (later) — MODEL CHANGEOVER 2: snap-derived roles on
+
+    SNAP_DERIVED_ROLE   False  ->  True
+
+Position groups are now ranked by **prior-week offensive snap share**
+where a snap number exists, falling back to chart order for players
+without one (and sorting them below everyone who has one — not taking a
+snap is itself evidence).
+
+`compare_props.py --min-week 2`, identical command, n = 9,358:
+
+| setting | CRPS recv | CRPS rec | skill recv | skill rec |
+|---|---|---|---|---|
+| chart roles | 6.559 | 0.529 | +0.1084 | +0.1027 |
+| **snap roles** | **6.531** | **0.526** | **+0.1123** | **+0.1075** |
+
+Brier across nine book-style lines: **9 better, 0 worse**, +0.0024 to
++0.0054 each. This is roughly ten times the size of the cross-team blend
+shipped earlier today, and it needed no live-board argument to carry it.
+
+**Week 1 gets nothing from this.** There is no prior game, so week 1
+keeps the chart and the 2026 wk1 slate is unchanged — no re-run, and no
+further model mixing inside week 1. It takes effect from week 2.
+
+### Why this one worked when four others didn't
+
+The per-player checkmark, full cross-team history, the production
+re-rank and `SHARE_PRIOR_K` were all attempts to get a better estimate
+out of the same inputs. Snaps are a **different input**. The deep-bucket
+negative result said in as many words that fixing role would need "a
+different input — snap share, say — not a better estimator." That was
+correct.
+
+### Serve-time correctness
+
+`snap_counts` is listed in `config.SERVE_TIME_FEEDS` as "week N-1", so
+the only legitimately visible number before kickoff is the previous
+game's. `prior_week_snaps()` shifts the week label to the week the number
+may be USED in, which is what makes it servable rather than a leak. The
+feed is keyed on `pfr_player_id`; the crosswalk to gsis comes from
+`rosters_weekly`, and rows that fail to cross are dropped rather than
+guessed.
+
+**The feed lags.** 2026 wk1 had only 187 rows a few hours after kickoff
+against ~1,200 for a full week. Check row counts before relying on it for
+a week-2 prediction; a half-landed feed silently re-ranks half a roster.
