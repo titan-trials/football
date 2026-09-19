@@ -63,7 +63,11 @@ MARKET_TO_PROP = {
 
 def model_prob_over(pmf: list, support_min: int, line: float) -> float:
     """P(total > line) from a stored pmf. Strict, as a book's 'over' is."""
+    if pmf is None:
+        return float("nan")
     p = np.asarray(pmf, dtype=float)
+    if p.ndim == 0 or p.size == 0:
+        return float("nan")
     sup = np.arange(support_min, support_min + len(p))
     return float(p[sup > line].sum())
 
@@ -108,7 +112,7 @@ def build(season: int, week: int, slate_dir: str = "slates",
     ]
     out = joined.with_columns(pl.Series("model_prob", probs)).with_columns(
         (pl.col("model_prob") - pl.col("market_prob")).alias("edge")
-    ).drop(["_pmf", "_support_min"])
+    ).drop(["_pmf", "_support_min"]).filter(pl.col("model_prob").is_not_nan())
 
     avail = slate.select(["player_id", "prop", "availability", "predicted_at",
                           "kickoff"]).unique()
